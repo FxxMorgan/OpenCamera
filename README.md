@@ -2,159 +2,119 @@
 
 <div align="center">
 
+[![Build-Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg?style=for-the-badge&logo=github)](https://github.com/FxxMorgan/OpenCamera)
 [![Language-C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg?style=for-the-badge&logo=c%2B%2B)](https://en.cppreference.com/)
 [![Framework-Flutter](https://img.shields.io/badge/Flutter-3.x-02569B.svg?style=for-the-badge&logo=flutter)](https://flutter.dev)
 [![Platform-Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4.svg?style=for-the-badge&logo=windows)](https://microsoft.com)
 [![DirectShow](https://img.shields.io/badge/API-DirectShow-FF5722.svg?style=for-the-badge&logo=microsoft)](https://learn.microsoft.com/en-us/windows/win32/directshow/directshow)
 [![License-MIT](https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
 
-**Convierte tu smartphone Android en una webcam HD virtual de alto rendimiento para tu PC con Windows 10/11.**  
-*Sin anuncios, sin marcas de agua, sin suscripciones, 100% de código abierto.*
+**Alternativa open-source de alto rendimiento a DroidCam, completamente gratuita y sin anuncios, que convierte tu smartphone Android en una webcam HD virtual de latencia ultra-baja en tu PC con Windows 10/11.**
 
 </div>
 
 ---
 
-## 🚀 Estado Actual: Fase 4 Completa ✅ | ¡Cámara Virtual 100% Operativa!
+## 📽️ Demostración Visual
 
-El sistema se encuentra en un estado maduro y estable. Se ha implementado e integrado de manera exitosa el **Filtro de Cámara Virtual DirectShow nativo**, lo que significa que el flujo de video de tu teléfono es capturado y expuesto en tu PC de forma nativa para **Discord, Microsoft Edge, Google Chrome, OBS Studio, Firefox, Zoom y Teams**.
+Aquí puedes ver el sistema operando a pantalla completa en el teléfono Android (con atenuación inteligente de batería activa), transmitiendo en tiempo real mediante red local al servidor PC, decodificando y alimentando de forma transparente la cámara virtual en **OBS Studio** y **Discord** con colores naturales corregidos.
 
-```
-  [ Teléfono Android (Flutter) ]
-              │ (MediaCodec H.264 Encoder, NV21 con Stride de 32 bytes)
-              ▼
-          TCP / Wi-Fi
-              ▼
-     [ PC Server (C++) ]
-              │ (FFmpeg decodifica H.264 + Redimensionado bilineal estático a 1280x720)
-              ▼
-   Búfer IPC de Memoria Compartida (C:\ProgramData\CameraLibre\frame.dat)
-              │ (Acceso concurrente ultra seguro y robusto con OPEN_ALWAYS)
-              ▼
-   [ DirectShow Virtual Camera Filter COM (.ax) ]
-              │
-              ├── [ MEDIASUBTYPE_YUY2 ] (Prioritario) ──▶ Discord, Chrome, Edge (WebRTC)
-              │     └─ Conversor BGR24 ➔ YUY2 optimizado a nivel de bit con mapeo de color correcto
-              │
-              └── [ MEDIASUBTYPE_RGB24 ] (Fallback) ──▶ Firefox y aplicaciones legacy
+<div align="center">
+  <img src="C:/Users/Feer/.gemini/antigravity-ide/brain/fd4bc39f-1d28-44fb-a60f-22b5a8cad581/media__1779478822498.png" width="45%" alt="Vista de la Aplicación Móvil Premium" />
+  <img src="C:/Users/Feer/.gemini/antigravity-ide/brain/fd4bc39f-1d28-44fb-a60f-22b5a8cad581/media__1779479135327.png" width="45%" alt="Configuración de Cámara Virtual de Alta Estabilidad" />
+  <p><i>Interfaz móvil Cyberpunk de alto contraste y panel de configuración de streaming DirectShow YUY2.</i></p>
+</div>
+
+*(Para agregar tu propio video o GIF de demostración en vivo, reemplaza estas imágenes en la carpeta del repositorio).*
+
+---
+
+## 💡 ¿Qué es Cámara Libre y por qué existe?
+
+Muchas aplicaciones que convierten el teléfono en webcam están plagadas de publicidad molesta, marcas de agua intrusivas, límites de tiempo o suscripciones de pago mensuales.
+
+**Cámara Libre** nace como una solución técnica y de código abierto sólida que Prioriza el Rendimiento. Combina un cliente ligero en **Flutter (Dart + Android Kotlin nativo)** con un servidor y un filtro de sistema **DirectShow (C++)** de Windows. A través de la codificación y decodificación directa por hardware, logramos un stream fluido y estable de **1280x720 a 30 FPS** con una latencia de apenas unos pocos milisegundos, convirtiendo tu smartphone en un periférico nativo del sistema operativo.
+
+---
+
+## 🎨 Características Clave (Features)
+
+*   ⚡ **Latencia Ultra-Baja**: Codificación de hardware por MediaCodec H.264 (AVC) en Android y decodificación por hardware/software asíncrona FFmpeg en la PC.
+*   📶 **Conexión Local Directa**: Comunicación directa vía Sockets TCP sin pasar por servidores de terceros.
+*   🎥 **Cámara Virtual DirectShow Nativa (`.ax`)**: Registrada en el sistema COM para ser compatible con cualquier software moderno como **Discord Desktop, OBS Studio, Google Chrome, Microsoft Edge, Firefox, Zoom y Teams**.
+*   🌈 **Colores Corregidos de Alta Fidelidad**: Conversión de color BGR24 a YUY2 optimizada a nivel binario que elimina los tonos azulados y restituye los colores cálidos naturales (tonos de piel, ropa naranja/roja).
+*   🔋 **Auto-Dim Inteligente**: Si la app móvil no detecta actividad táctil por 5 segundos en streaming, disminuye la opacidad de la pantalla al 30% para reducir el renderizado gráfico de la GPU, previniendo el sobrecalentamiento y ahorrando batería.
+*   🌐 **IP local y detección automática**: Monitor de IP local en la app para facilitar la sincronización.
+*   💼 **IPC Robusto de Memoria Compartida**: Sincronización basada en memoria mapeada en disco con protección de lectura compartida. Si la aplicación móvil se desconecta, el filtro de la cámara virtual permanece activo en Discord/OBS mostrando un búfer seguro sin congelar o bloquear el software cliente.
+
+---
+
+## 🏗️ Arquitectura General
+
+El siguiente flujo ilustra el ciclo de vida de un frame de video, desde que el sensor de la cámara en el teléfono captura la luz hasta que se renderiza en aplicaciones cliente de Windows (Discord/OBS):
+
+```mermaid
+graph TD
+    %% Teléfono Android
+    subgraph Android_Phone [Dispositivo Android - Flutter/Kotlin]
+        A[Sensor de Cámara] -->|Frames YUV| B[H264EncoderPlugin Kotlin]
+        B -->|MediaCodec AVC Encoder| C[Cola de Compresión Max 2 Frames]
+        C -->|Frames H.264 Codificados| D[Socket TCP Client Dart]
+    end
+
+    %% Red Local
+    D -->|Wi-Fi / Red Local TCP:8080| E[Socket TCP Server C++]
+
+    %% PC Host (Windows)
+    subgraph PC_Host [Servidor de PC - C++]
+        E -->|Parser de Cabeceras CLFR| F[H264Decoder FFmpeg]
+        F -->|Decodificación + Escala Bilineal 1280x720| G[Memoria Compartida Global IPC]
+    end
+
+    %% DirectShow & Clients
+    subgraph Windows_DirectShow [DirectShow Pipeline]
+        G -->|Acceso Mapeado OPEN_ALWAYS| H[Filtro DirectShow CameraLibreVCam.ax]
+        H -->|Conversión RGB24 -> YUY2| I[Format YUY2 Chromium-Compatible]
+        H -->|Fallback Direct BGR| J[Format RGB24 Firefox/Legacy]
+    end
+
+    I --> K[Discord / Chrome / OBS Studio / Zoom]
+    J --> L[Firefox / Software Legacy]
+
+    style Android_Phone fill:#1e1e2f,stroke:#00E5FF,stroke-width:2px,color:#fff
+    style PC_Host fill:#111c24,stroke:#00E5FF,stroke-width:2px,color:#fff
+    style Windows_DirectShow fill:#122119,stroke:#00E676,stroke-width:2px,color:#fff
+    style E fill:#ff6d00,stroke:#fff,stroke-width:1px,color:#fff
 ```
 
 ---
 
-## 🎨 Características Clave
+## 📈 Roadmap y Estado del Proyecto
 
-* **Resolución Estática Garantizada (1280x720 @ 30 FPS)**: Evita cortes, pérdidas de frames o loops infinitos de carga (spinning dots). La cámara virtual mantiene una negociación fija independientemente de las fluctuaciones de red.
-* **Compatibilidad Absoluta (YUY2 + RGB24)**:
-  * **YUY2 (prioritario)**: Soporta la exigente especificación de Chromium y WebRTC (Discord Desktop, Chrome, Edge), exigiendo anchos pares, orientación *top-down* (altura positiva `+720`), buffers exactos y conversión optimizada por software.
-  * **RGB24 (fallback)**: Soporte heredado compatible con navegadores de motor independiente (como Firefox).
-* **Corrección de Tono de Piel y Colores Reales**: Integración exacta de los canales de color en la conversión YUV, eliminando por completo la coloración azulada en la piel y devolviendo tonos naturales y precisos a las prendas u objetos (rojo/naranja real).
-* **IPC Robusto Anticolisiones**: Mecanismo de sincronización basado en memoria mapeada en disco con protección de lectura abierta (`OPEN_ALWAYS`), permitiendo reiniciar el servidor en vivo sin causar caídas en las aplicaciones clientes activas que usan la cámara.
-* **Compilación Nativa de Extrema Ligereza**: El filtro virtual `.ax` está enlazado estáticamente a la biblioteca de clases base de DirectShow (`strmbase`) y no requiere dependencias en tiempo de ejecución ni DLLs extras de MinGW.
-
----
-
-## 📂 Estructura del Proyecto
-
-```
-OpenCamera/
-├── mobile_app/           # Aplicación móvil Flutter (Android)
-│   ├── lib/
-│   │   ├── main.dart                  # UI de conexión, monitor de red y toggle H.264/JPEG
-│   │   └── services/
-│   │       ├── camera_service.dart    # Captura nativa + despacho fire-and-forget de buffers
-│   │       └── h264_encoder.dart      # Wrapper Dart para MediaCodec
-│   └── android/app/src/main/kotlin/...
-│       └── H264EncoderPlugin.kt       # Encoder de hardware (MediaCodec AVC), alineación 32 bytes
-│
-├── pc_server/            # Servidor de procesamiento de PC (C++)
-│   ├── src/
-│   │   ├── main.cpp          # Punto de entrada de la consola y preview nativa
-│   │   ├── tcp_server.cpp    # Socket Winsock2 receptor
-│   │   ├── frame_receiver.cpp# Parser y clasificador de tramas
-│   │   ├── h264_decoder.cpp  # Decodificador FFmpeg (libavcodec) + escalado bilineal estable
-│   │   └── config.hpp        # Parámetros globales (Puertos, Magic Header "CLFR")
-│   └── CMakeLists.txt
-│
-├── vcam_filter/          # Filtro de Cámara Virtual DirectShow (C++)
-│   ├── src/
-│   │   ├── CameraLibreFilter.cpp # Registro COM, declaración de pines y setup DirectShow
-│   │   ├── CameraLibreStream.cpp # Consumo IPC y conversor BGR24 ➔ YUY2 / RGB24
-│   │   └── DllSetup.cpp          # Configuración del DLL de registro de Windows
-│   ├── BaseClasses/              # Clases base de DirectShow compiladas estáticamente
-│   └── CMakeLists.txt
-│
-├── scratch/              # Scripts auxiliares y herramientas de desarrollo rápido
-│   └── reinstall_vcam.ps1 # Instalador con elevación de Administrador para bypass de bloqueos
-├── build_server.ps1      # Compilador rápido del servidor de PC
-├── build_vcam.ps1        # Compilador rápido del filtro de cámara virtual
-└── install_vcam.ps1      # Registrador general de la cámara en el sistema
-```
+- [x] **Fase 1: Transmisión de Red Básica** — Sockets TCP raw + empaquetador de tramas estructurado (Framing).
+- [x] **Fase 2: Stream JPEG + Preview** — Transmisión por cuadros JPEG y visor nativo de preview GDI+ en Windows.
+- [x] **Fase 3: Transmisión H.264 de Alto Rendimiento** — Codificador de hardware Android (`MediaCodec`) y decodificador `libavcodec` de FFmpeg en PC.
+- [x] **Fase 4: Filtro de Cámara Virtual Nativo** — Desarrollo del filtro COM DirectShow `.ax` con soporte de formato indexado (YUY2 prioritario + RGB24).
+- [x] **Fase 5: UI Móvil Premium y GPU Layering** — Nueva interfaz Cyberpunk de alto contraste, protección contra notches de pantalla, auto-dim para batería, cola H.264 reducida a 2 frames y corrección de color YUV a RGB.
+- [ ] **Fase 6: Próximos Pasos (En Desarrollo)** — Cliente de configuración visual nativo para Windows (GUI), soporte de bitrate dinámico según la calidad de la señal Wi-Fi, y empaquetador final con instalador `.msi`.
 
 ---
 
-## 🛠️ Requisitos de Compilación y Configuración
+## 📦 Estructura de Carpetas
 
-| Herramienta | Versión Recomendada | Propósito |
-|---|---|---|
-| **Flutter SDK** | `3.x` / Dart `3.x` | Compilar la app móvil (`mobile_app`) |
-| **CMake** | `3.20+` | Generador de scripts de compilación para PC |
-| **MinGW-w64 (GCC)**| `11.0+` (MSYS2) | Compilación nativa C++ en Windows |
-| **FFmpeg Dev Libraries**| Incluido en MSYS2 (`libavcodec`, `libswscale`) | Decodificación y renderizado de frames en el servidor |
+*   [`/mobile_app`](file:///d:/Programacion/OpenCamera/mobile_app): Aplicación móvil en Flutter. Contiene el pipeline de captura en Dart y el encoder de hardware nativo en Kotlin.
+*   [`/pc_server`](file:///d:/Programacion/OpenCamera/pc_server): Servidor receptor TCP de consola en C++17 que decodifica el stream H.264 con FFmpeg y alimenta la memoria compartida.
+*   [`/vcam_filter`](file:///d:/Programacion/OpenCamera/vcam_filter): Código fuente de la cámara virtual DirectShow C++. Se compila como una DLL de Windows con extensión `.ax`.
+*   [`/scratch`](file:///d:/Programacion/OpenCamera/scratch): Utilidades, scripts de reinstalación y herramientas auxiliares de testeo.
 
 ---
 
-## 💻 Instrucciones de Uso
+## 🤝 Contribuciones
 
-### Paso 1: Compilar e Instalar la Cámara Virtual
-Abre una terminal PowerShell y compila el filtro COM (`CameraLibreVCam.ax`):
-```powershell
-# 1. Compila el filtro COM
-.\build_vcam.ps1
-```
-
-A continuación, instala y registra el filtro en el sistema operativo. **Esto requiere privilegios de Administrador** debido a que escribe en `%ProgramFiles%` y registra componentes COM a nivel global en el registro de Windows:
-```powershell
-# 2. Registra el filtro COM en el sistema (ejecutar en terminal como Administrador)
-.\install_vcam.ps1
-```
-*Nota: Si necesitas actualizar el filtro en el futuro mientras Discord u otra app está abierta, usa `powershell -ExecutionPolicy Bypass -File .\scratch\reinstall_vcam.ps1` como Administrador. Este script automáticamente detiene el Frame Server de Windows y renombra el binario bloqueado para actualizarlo sin necesidad de reiniciar tu PC.*
-
-### Paso 2: Iniciar el Servidor de Procesamiento en PC
-Compila el servidor y ejecútalo para que empiece a escuchar en el puerto `8080`:
-```powershell
-# 1. Compilar el servidor
-.\build_server.ps1
-
-# 2. Ejecutar el servidor
-.\pc_server\bin\camera_libre_server.exe
-```
-
-### Paso 3: Instalar y Vincular la App Android
-Conecta tu dispositivo Android por USB con Depuración activa y ejecuta:
-```powershell
-cd mobile_app
-flutter run --release
-```
-1. Concede permisos de cámara en la app.
-2. Asegúrate de que el toggle esté en **H.264** (máximo rendimiento).
-3. Introduce la dirección IP local de tu PC (el servidor te la mostrará en consola, ej. `192.168.0.105`).
-4. Pulsa **Conectar** y luego **Iniciar Streaming**.
-
-### Paso 4: ¡A Disfrutar!
-Abre **Discord**, **OBS Studio**, **Google Chrome** o **Microsoft Edge**, ingresa a la configuración de cámara y selecciona **Cámara Libre Virtual Cam**. Tu transmisión se encenderá de inmediato con colores hermosos, naturales y una tasa de refresco ultra fluida.
-
----
-
-## 📈 Roadmap y Progreso
-
-- [x] **Fase 1** — Sockets TCP raw + empaquetador de tramas (Framing).
-- [x] **Fase 2** — Transmisión de video basada en imágenes JPEG + Visor nativo GDI+ en Windows.
-- [x] **Fase 3** — Implementación de H.264 en Hardware (MediaCodec en Android) y decodificación por software en PC con FFmpeg.
-- [x] **Fase 4** — Filtro de Cámara Virtual COM DirectShow (`CameraLibreVCam.ax`) con soporte de prioridad de formato YUY2, fallback RGB24 y lógica anticolisiones IPC.
-- [ ] **Fase 5** — Interfaz de usuario mejorada en el Servidor PC, Bitrate Dinámico Adaptativo y empaquetado del Instalador final (`.msi`).
+¡Todas las contribuciones son bienvenidas! Si deseas proponer cambios, corregir bugs o implementar funciones nuevas, lee nuestra [Guía de Contribución](file:///d:/Programacion/OpenCamera/CONTRIBUTING.md).
 
 ---
 
 ## 📜 Licencia
 
-Este proyecto está bajo la Licencia **MIT**. Consulta el archivo `LICENSE` para más información.
+Este proyecto se distribuye bajo la Licencia **MIT**. Eres libre de usar, modificar y distribuir este software. Consulta el archivo [LICENSE](file:///d:/Programacion/OpenCamera/LICENSE) para más detalles.

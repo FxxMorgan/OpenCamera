@@ -542,19 +542,21 @@ class _CameraScreenState extends State<CameraScreen>
         child: Stack(
           fit: StackFit.expand,
           children: [
-            // ── Layer 1: Camera preview (fullscreen) ──
+            // ── Layer 1: Camera preview (fullscreen) with RepaintBoundary ──
             if (_cameraReady && _cam.controller != null)
-              AnimatedOpacity(
-                opacity: _previewOpacity,
-                duration: const Duration(milliseconds: 600),
-                curve: Curves.easeInOut,
-                child: SizedBox.expand(
-                  child: FittedBox(
-                    fit: BoxFit.cover,
-                    child: SizedBox(
-                      width: _cam.controller!.value.previewSize?.height ?? 1280,
-                      height: _cam.controller!.value.previewSize?.width ?? 720,
-                      child: CameraPreview(_cam.controller!),
+              RepaintBoundary(
+                child: AnimatedOpacity(
+                  opacity: _previewOpacity,
+                  duration: const Duration(milliseconds: 600),
+                  curve: Curves.easeInOut,
+                  child: SizedBox.expand(
+                    child: FittedBox(
+                      fit: BoxFit.cover,
+                      child: SizedBox(
+                        width: _cam.controller!.value.previewSize?.height ?? 1280,
+                        height: _cam.controller!.value.previewSize?.width ?? 720,
+                        child: CameraPreview(_cam.controller!),
+                      ),
                     ),
                   ),
                 ),
@@ -608,49 +610,56 @@ class _CameraScreenState extends State<CameraScreen>
                 ),
               ),
 
-            // ── Layer 3: Top header bar (Premium Glass Bar) ──
+            // ── Layer 3: Top header bar (Ultra Premium High-Contrast Bar) ──
             Positioned(
               top: 0,
               left: 0,
               right: 0,
-              child: Container(
-                padding: EdgeInsets.fromLTRB(
-                    16, MediaQuery.of(context).padding.top + 10, 16, 12),
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [
-                      Colors.black.withOpacity(0.75),
-                      Colors.black.withOpacity(0.4),
-                      Colors.transparent,
+              child: RepaintBoundary(
+                child: Container(
+                  padding: EdgeInsets.fromLTRB(
+                      16, MediaQuery.of(context).padding.top + 12, 16, 16),
+                  decoration: BoxDecoration(
+                    color: const Color(0xEC0A0E1A), // Solid dark premium navy
+                    border: const Border(
+                      bottom: BorderSide(
+                        color: Color(0xFF00E5FF), // Thin bright neon cyan bottom border
+                        width: 1.5,
+                      ),
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: const Color(0xFF00E5FF).withOpacity(0.15),
+                        blurRadius: 10,
+                        offset: const Offset(0, 2),
+                      ),
                     ],
                   ),
-                ),
-                child: Row(
-                  children: [
-                    // Status badge
-                    _buildStatusBadge(),
-                    const SizedBox(width: 8),
-                    // FPS counter
-                    if (_streaming)
-                      _buildFpsBadge(),
-                    const Spacer(),
-                    // Settings button
-                    _overlayButton(
-                      icon: Icons.settings,
-                      onTap: _showSettingsPopup,
-                    ),
-                    const SizedBox(width: 8),
-                    // Switch camera
-                    _overlayButton(
-                      icon: Icons.flip_camera_android,
-                      onTap: () async {
-                        await _cam.switchCamera();
-                        setState(() {});
-                      },
-                    ),
-                  ],
+                  child: Row(
+                    children: [
+                      // Status badge
+                      _buildStatusBadge(),
+                      const SizedBox(width: 8),
+                      // FPS counter
+                      if (_streaming)
+                        _buildFpsBadge(),
+                      const Spacer(),
+                      // Settings button
+                      _overlayButton(
+                        icon: Icons.settings,
+                        onTap: _showSettingsPopup,
+                      ),
+                      const SizedBox(width: 8),
+                      // Switch camera
+                      _overlayButton(
+                        icon: Icons.flip_camera_android,
+                        onTap: () async {
+                          await _cam.switchCamera();
+                          setState(() {});
+                        },
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -660,7 +669,9 @@ class _CameraScreenState extends State<CameraScreen>
               bottom: MediaQuery.of(context).padding.bottom + 16,
               left: 16,
               right: 16,
-              child: _buildBottomBar(),
+              child: RepaintBoundary(
+                child: _buildBottomBar(),
+              ),
             ),
           ],
         ),
@@ -751,11 +762,22 @@ class _CameraScreenState extends State<CameraScreen>
     );
   }  Widget _buildBottomBar() {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
-        color: Colors.black.withOpacity(0.55),
+        color: const Color(0xED0A0E1A), // Solid dark premium navy background
         borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: Colors.white.withOpacity(0.08)),
+        border: Border.all(
+          color: const Color(0xFF00E5FF), // High-visibility neon cyan border
+          width: 1.5,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF00E5FF).withOpacity(0.25), // High-contrast neon cyan glow
+            blurRadius: 16,
+            spreadRadius: 1,
+            offset: const Offset(0, 4),
+          ),
+        ],
       ),
       child: Row(
         children: [
