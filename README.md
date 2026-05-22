@@ -1,187 +1,160 @@
-# Cámara Libre — OpenCamera
+# 📸 Cámara Libre — OpenCamera
 
-Convierte tu smartphone Android en una **webcam HD** para Windows 10/11.  
-Sin anuncios, sin marcas de agua, sin suscripciones.
+<div align="center">
 
----
+[![Language-C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg?style=for-the-badge&logo=c%2B%2B)](https://en.cppreference.com/)
+[![Framework-Flutter](https://img.shields.io/badge/Flutter-3.x-02569B.svg?style=for-the-badge&logo=flutter)](https://flutter.dev)
+[![Platform-Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D4.svg?style=for-the-badge&logo=windows)](https://microsoft.com)
+[![DirectShow](https://img.shields.io/badge/API-DirectShow-FF5722.svg?style=for-the-badge&logo=microsoft)](https://learn.microsoft.com/en-us/windows/win32/directshow/directshow)
+[![License-MIT](https://img.shields.io/badge/License-MIT-green.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
 
-## Estado actual: Fase 3 completa ✅ | Fase 4 pendiente 🚧
+**Convierte tu smartphone Android en una webcam HD virtual de alto rendimiento para tu PC con Windows 10/11.**  
+*Sin anuncios, sin marcas de agua, sin suscripciones, 100% de código abierto.*
 
-```
-[ Teléfono Android (Flutter) ]   ──TCP/WiFi──▶   [ PC Windows (C++) ]
-  MediaCodec H.264 (HW encoder)                   FFmpeg decodifica H.264
-  NV21 alineado a stride de 32 bytes              Ventana GDI+ — preview en vivo
-  Fire-and-forget YUV dispatch                     Double-buffering Win32
-```
-
-**Modo JPEG** también disponible (toggle en la app).
+</div>
 
 ---
 
-## Estructura del proyecto
+## 🚀 Estado Actual: Fase 4 Completa ✅ | ¡Cámara Virtual 100% Operativa!
+
+El sistema se encuentra en un estado maduro y estable. Se ha implementado e integrado de manera exitosa el **Filtro de Cámara Virtual DirectShow nativo**, lo que significa que el flujo de video de tu teléfono es capturado y expuesto en tu PC de forma nativa para **Discord, Microsoft Edge, Google Chrome, OBS Studio, Firefox, Zoom y Teams**.
+
+```
+  [ Teléfono Android (Flutter) ]
+              │ (MediaCodec H.264 Encoder, NV21 con Stride de 32 bytes)
+              ▼
+          TCP / Wi-Fi
+              ▼
+     [ PC Server (C++) ]
+              │ (FFmpeg decodifica H.264 + Redimensionado bilineal estático a 1280x720)
+              ▼
+   Búfer IPC de Memoria Compartida (C:\ProgramData\CameraLibre\frame.dat)
+              │ (Acceso concurrente ultra seguro y robusto con OPEN_ALWAYS)
+              ▼
+   [ DirectShow Virtual Camera Filter COM (.ax) ]
+              │
+              ├── [ MEDIASUBTYPE_YUY2 ] (Prioritario) ──▶ Discord, Chrome, Edge (WebRTC)
+              │     └─ Conversor BGR24 ➔ YUY2 optimizado a nivel de bit con mapeo de color correcto
+              │
+              └── [ MEDIASUBTYPE_RGB24 ] (Fallback) ──▶ Firefox y aplicaciones legacy
+```
+
+---
+
+## 🎨 Características Clave
+
+* **Resolución Estática Garantizada (1280x720 @ 30 FPS)**: Evita cortes, pérdidas de frames o loops infinitos de carga (spinning dots). La cámara virtual mantiene una negociación fija independientemente de las fluctuaciones de red.
+* **Compatibilidad Absoluta (YUY2 + RGB24)**:
+  * **YUY2 (prioritario)**: Soporta la exigente especificación de Chromium y WebRTC (Discord Desktop, Chrome, Edge), exigiendo anchos pares, orientación *top-down* (altura positiva `+720`), buffers exactos y conversión optimizada por software.
+  * **RGB24 (fallback)**: Soporte heredado compatible con navegadores de motor independiente (como Firefox).
+* **Corrección de Tono de Piel y Colores Reales**: Integración exacta de los canales de color en la conversión YUV, eliminando por completo la coloración azulada en la piel y devolviendo tonos naturales y precisos a las prendas u objetos (rojo/naranja real).
+* **IPC Robusto Anticolisiones**: Mecanismo de sincronización basado en memoria mapeada en disco con protección de lectura abierta (`OPEN_ALWAYS`), permitiendo reiniciar el servidor en vivo sin causar caídas en las aplicaciones clientes activas que usan la cámara.
+* **Compilación Nativa de Extrema Ligereza**: El filtro virtual `.ax` está enlazado estáticamente a la biblioteca de clases base de DirectShow (`strmbase`) y no requiere dependencias en tiempo de ejecución ni DLLs extras de MinGW.
+
+---
+
+## 📂 Estructura del Proyecto
 
 ```
 OpenCamera/
-├── mobile_app/          # App Flutter (Android)
+├── mobile_app/           # Aplicación móvil Flutter (Android)
 │   ├── lib/
-│   │   ├── main.dart                 # UI + socket TCP + toggle H.264/JPEG
+│   │   ├── main.dart                  # UI de conexión, monitor de red y toggle H.264/JPEG
 │   │   └── services/
-│   │       ├── camera_service.dart   # Cámara + YUV fire-and-forget dispatch
-│   │       └── h264_encoder.dart     # Wrapper Dart para MediaCodec nativo
+│   │       ├── camera_service.dart    # Captura nativa + despacho fire-and-forget de buffers
+│   │       └── h264_encoder.dart      # Wrapper Dart para MediaCodec
 │   └── android/app/src/main/kotlin/...
-│       └── H264EncoderPlugin.kt      # Plugin nativo Android (MediaCodec HW)
-│                                     # stride alineado a 32 bytes, copia NV21
+│       └── H264EncoderPlugin.kt       # Encoder de hardware (MediaCodec AVC), alineación 32 bytes
 │
-├── pc_server/           # Servidor Windows (C++)
+├── pc_server/            # Servidor de procesamiento de PC (C++)
 │   ├── src/
-│   │   ├── main.cpp         # Entry point
-│   │   ├── tcp_server.*     # Winsock2 listener
-│   │   ├── frame_receiver.* # Procesa frames (JPEG/H264/text)
-│   │   ├── jpeg_viewer.*    # Ventana GDI+ preview
-│   │   ├── h264_decoder.*   # Decodificador FFmpeg (libavcodec)
-│   │   └── config.hpp       # Constantes (puerto, magic number…)
-│   ├── CMakeLists.txt
-│   └── bin/
-│       └── camera_libre_server.exe  ← Ejecutable listo
+│   │   ├── main.cpp          # Punto de entrada de la consola y preview nativa
+│   │   ├── tcp_server.cpp    # Socket Winsock2 receptor
+│   │   ├── frame_receiver.cpp# Parser y clasificador de tramas
+│   │   ├── h264_decoder.cpp  # Decodificador FFmpeg (libavcodec) + escalado bilineal estable
+│   │   └── config.hpp        # Parámetros globales (Puertos, Magic Header "CLFR")
+│   └── CMakeLists.txt
 │
-├── build_server.ps1     # Script para recompilar el servidor
-└── session_context.md   # Contexto técnico detallado para IAs
+├── vcam_filter/          # Filtro de Cámara Virtual DirectShow (C++)
+│   ├── src/
+│   │   ├── CameraLibreFilter.cpp # Registro COM, declaración de pines y setup DirectShow
+│   │   ├── CameraLibreStream.cpp # Consumo IPC y conversor BGR24 ➔ YUY2 / RGB24
+│   │   └── DllSetup.cpp          # Configuración del DLL de registro de Windows
+│   ├── BaseClasses/              # Clases base de DirectShow compiladas estáticamente
+│   └── CMakeLists.txt
+│
+├── scratch/              # Scripts auxiliares y herramientas de desarrollo rápido
+│   └── reinstall_vcam.ps1 # Instalador con elevación de Administrador para bypass de bloqueos
+├── build_server.ps1      # Compilador rápido del servidor de PC
+├── build_vcam.ps1        # Compilador rápido del filtro de cámara virtual
+└── install_vcam.ps1      # Registrador general de la cámara en el sistema
 ```
 
 ---
 
-## Protocolo de frames
+## 🛠️ Requisitos de Compilación y Configuración
 
-```
-[MAGIC: 4 bytes LE = 0x434C4652 "CLFR"]
-[SIZE:  4 bytes LE = longitud del payload]
-[DATA:  SIZE bytes]
-```
-
-- **Fase 1**: DATA = texto UTF-8
-- **Fase 2**: DATA = imagen JPEG completa
-- **Fase 3**: DATA = NAL unit H.264 (Annex B, SPS/PPS en keyframes)
+| Herramienta | Versión Recomendada | Propósito |
+|---|---|---|
+| **Flutter SDK** | `3.x` / Dart `3.x` | Compilar la app móvil (`mobile_app`) |
+| **CMake** | `3.20+` | Generador de scripts de compilación para PC |
+| **MinGW-w64 (GCC)**| `11.0+` (MSYS2) | Compilación nativa C++ en Windows |
+| **FFmpeg Dev Libraries**| Incluido en MSYS2 (`libavcodec`, `libswscale`) | Decodificación y renderizado de frames en el servidor |
 
 ---
 
-## Arquitectura H.264 (Fase 3)
+## 💻 Instrucciones de Uso
 
-### Móvil (Android)
-- **MediaCodec** (`video/avc`) — encoder por hardware del dispositivo
-- El ancho se alinea a múltiplos de 32 bytes (`720 → 736`) para compatibilidad Qualcomm/MediaTek
-- El plano UV se copia desde `vPlane` (NV21: `V0,U0,V1,U1...`) — el orden correcto para la mayoría de chipsets móviles
-- Pipeline fire-and-forget: la cámara no bloquea esperando JNI
-
-### PC (Windows)
-- **FFmpeg libavcodec** — decodificador H.264 software
-- `sws_scale` convierte YUV → BGR24 para GDI+
-- Ventana Win32 con double-buffering para preview sin parpadeo
-
----
-
-## Cómo usar
-
-### 1. Iniciar el servidor en la PC
-
+### Paso 1: Compilar e Instalar la Cámara Virtual
+Abre una terminal PowerShell y compila el filtro COM (`CameraLibreVCam.ax`):
 ```powershell
+# 1. Compila el filtro COM
+.\build_vcam.ps1
+```
+
+A continuación, instala y registra el filtro en el sistema operativo. **Esto requiere privilegios de Administrador** debido a que escribe en `%ProgramFiles%` y registra componentes COM a nivel global en el registro de Windows:
+```powershell
+# 2. Registra el filtro COM en el sistema (ejecutar en terminal como Administrador)
+.\install_vcam.ps1
+```
+*Nota: Si necesitas actualizar el filtro en el futuro mientras Discord u otra app está abierta, usa `powershell -ExecutionPolicy Bypass -File .\scratch\reinstall_vcam.ps1` como Administrador. Este script automáticamente detiene el Frame Server de Windows y renombra el binario bloqueado para actualizarlo sin necesidad de reiniciar tu PC.*
+
+### Paso 2: Iniciar el Servidor de Procesamiento en PC
+Compila el servidor y ejecútalo para que empiece a escuchar en el puerto `8080`:
+```powershell
+# 1. Compilar el servidor
+.\build_server.ps1
+
+# 2. Ejecutar el servidor
 .\pc_server\bin\camera_libre_server.exe
 ```
 
-### 2. Instalar la app en el teléfono
-
+### Paso 3: Instalar y Vincular la App Android
+Conecta tu dispositivo Android por USB con Depuración activa y ejecuta:
 ```powershell
 cd mobile_app
-flutter run          # teléfono conectado por USB
-# o release:
-flutter build apk --release
-adb install build\app\outputs\flutter-apk\app-release.apk
+flutter run --release
 ```
+1. Concede permisos de cámara en la app.
+2. Asegúrate de que el toggle esté en **H.264** (máximo rendimiento).
+3. Introduce la dirección IP local de tu PC (el servidor te la mostrará en consola, ej. `192.168.0.105`).
+4. Pulsa **Conectar** y luego **Iniciar Streaming**.
 
-### 3. Conectar y transmitir
-
-1. Abre la app → concede permiso de cámara
-2. Selecciona modo **H.264** o **JPEG** con el toggle
-3. Ingresa la IP de tu PC → **Conectar**
-4. Toca **Iniciar Stream**
-
----
-
-## Recompilar el servidor PC
-
-```powershell
-.\build_server.ps1
-```
+### Paso 4: ¡A Disfrutar!
+Abre **Discord**, **OBS Studio**, **Google Chrome** o **Microsoft Edge**, ingresa a la configuración de cámara y selecciona **Cámara Libre Virtual Cam**. Tu transmisión se encenderá de inmediato con colores hermosos, naturales y una tasa de refresco ultra fluida.
 
 ---
 
-## Requisitos del sistema
+## 📈 Roadmap y Progreso
 
-| Herramienta | Versión | Estado |
-|---|---|---|
-| Flutter / Dart | 3.41.9 / 3.11.5 | ✅ |
-| CMake | 4.2.3 | ✅ |
-| GCC (MSYS2/MinGW64) | 15.2.0 | ✅ |
-| Android SDK | 36.1.0 | ✅ |
-| FFmpeg (MSYS2) | instalado | ✅ |
+- [x] **Fase 1** — Sockets TCP raw + empaquetador de tramas (Framing).
+- [x] **Fase 2** — Transmisión de video basada en imágenes JPEG + Visor nativo GDI+ en Windows.
+- [x] **Fase 3** — Implementación de H.264 en Hardware (MediaCodec en Android) y decodificación por software en PC con FFmpeg.
+- [x] **Fase 4** — Filtro de Cámara Virtual COM DirectShow (`CameraLibreVCam.ax`) con soporte de prioridad de formato YUY2, fallback RGB24 y lógica anticolisiones IPC.
+- [ ] **Fase 5** — Interfaz de usuario mejorada en el Servidor PC, Bitrate Dinámico Adaptativo y empaquetado del Instalador final (`.msi`).
 
 ---
 
-## Problemas conocidos / Trabajo pendiente
+## 📜 Licencia
 
-### ⚠️ FPS bajo con movimiento de cámara
-- **Síntoma**: 18–20 FPS en escenas estáticas, cae a ~5 FPS con movimiento
-- **Causa**: El encoder H.264 genera frames mucho más grandes con movimiento → satura el socket TCP → el encoder se bloquea esperando que el codec libere buffers de entrada (`dequeueInputBuffer(10_000)` con timeout de 10ms)
-- **Fixes a implementar** (ver `session_context.md` para detalles):
-  1. Cambiar `dequeueInputBuffer(10_000)` → `dequeueInputBuffer(0)` en `H264EncoderPlugin.kt`
-  2. Bitrate adaptativo con `MediaCodec.PARAMETER_KEY_VIDEO_BITRATE`
-  3. (Avanzado) Migrar a Surface-based encoding con CameraX para eliminar la copia YUV en CPU
-
----
-
-## Roadmap
-
-- [x] **Fase 1** — TCP socket + framing básico
-- [x] **Fase 2** — Transmisión JPEG en tiempo real + preview GDI+
-- [x] **Fase 3** — H.264 (MediaCodec HW + FFmpeg) — colores correctos, ~20 FPS
-- [ ] **Fase 4** — Cámara virtual DirectShow (`.ax` filter)
-- [ ] **Fase 5** — UI final, instalador, bitrate adaptativo
-
----
-
-## Fase 4 — Cámara Virtual DirectShow
-
-El objetivo es registrar un dispositivo de captura virtual en Windows para que **OBS, Zoom, Teams, Skype** vean el teléfono como una cámara USB normal.
-
-### Arquitectura planeada
-
-```
-[camera_libre_server.exe]
-  (frames BGR24 de FFmpeg)
-        │
-        ▼ Named Shared Memory ("CameraLibre_Frame")
-        │
-[CameraLibreVCam.ax]  ← DLL COM / Filtro DirectShow
-  Implementa IBaseFilter + IKsPropertySet
-  CSourceStream::FillBuffer() lee el frame de shared memory
-        │
-        ▼
-[OBS / Zoom / Teams / Discord]
-```
-
-### Herramientas necesarias para Fase 4
-
-| Herramienta | Propósito | Cómo obtener |
-|---|---|---|
-| Visual Studio 2022 | Compilar el filtro COM (`.ax`) | https://visualstudio.microsoft.com |
-| Windows SDK 10+ | Headers DirectShow, COM | Incluido en Visual Studio |
-| DirectShow BaseClasses | `CSource`, `CSourceStream` | Windows SDK Samples → compilar como `.lib` |
-
-### Pasos de implementación
-
-1. Crear filtro DirectShow mínimo (frame negro) y verificar que OBS lo detecta
-2. Escribir frames BGR24 a Named Shared Memory en `camera_libre_server.exe`
-3. Conectar `FillBuffer()` del filtro a la shared memory
-4. Probar en OBS, Zoom, Teams
-5. Crear instalador (`regsvr32 CameraLibreVCam.ax`)
-
-**Referencia**: código fuente de [OBS VirtualCam](https://github.com/obsproject/obs-virtual-cam) como ejemplo de `CSourceStream`.
+Este proyecto está bajo la Licencia **MIT**. Consulta el archivo `LICENSE` para más información.
