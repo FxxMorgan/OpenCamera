@@ -95,7 +95,7 @@ class H264EncoderPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
                 if (yPlane != null && uPlane != null && vPlane != null && isRunning.get()) {
                     synchronized(queueLock) {
-                        if (frameQueue.size > 5) {
+                        if (frameQueue.size > 2) {
                             frameQueue.removeFirst()
                         }
                         frameQueue.addLast(
