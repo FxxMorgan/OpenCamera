@@ -510,6 +510,8 @@ class _CameraScreenState extends State<CameraScreen>
         status: _status,
         streaming: _streaming,
         log: _log,
+        onConnect: _connect,
+        onDisconnect: () => _disconnect(),
         onQualityChanged: (q) async {
           setState(() => _quality = q);
           await _cam.setQuality(q);
@@ -606,35 +608,50 @@ class _CameraScreenState extends State<CameraScreen>
                 ),
               ),
 
-            // ── Layer 3: Top overlay — status + settings ──
+            // ── Layer 3: Top header bar (Premium Glass Bar) ──
             Positioned(
-              top: MediaQuery.of(context).padding.top + 8,
-              left: 12,
-              right: 12,
-              child: Row(
-                children: [
-                  // Status badge
-                  _buildStatusBadge(),
-                  const SizedBox(width: 8),
-                  // FPS counter
-                  if (_streaming)
-                    _buildFpsBadge(),
-                  const Spacer(),
-                  // Settings button
-                  _overlayButton(
-                    icon: Icons.settings,
-                    onTap: _showSettingsPopup,
+              top: 0,
+              left: 0,
+              right: 0,
+              child: Container(
+                padding: EdgeInsets.fromLTRB(
+                    16, MediaQuery.of(context).padding.top + 10, 16, 12),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.black.withOpacity(0.75),
+                      Colors.black.withOpacity(0.4),
+                      Colors.transparent,
+                    ],
                   ),
-                  const SizedBox(width: 8),
-                  // Switch camera
-                  _overlayButton(
-                    icon: Icons.flip_camera_android,
-                    onTap: () async {
-                      await _cam.switchCamera();
-                      setState(() {});
-                    },
-                  ),
-                ],
+                ),
+                child: Row(
+                  children: [
+                    // Status badge
+                    _buildStatusBadge(),
+                    const SizedBox(width: 8),
+                    // FPS counter
+                    if (_streaming)
+                      _buildFpsBadge(),
+                    const Spacer(),
+                    // Settings button
+                    _overlayButton(
+                      icon: Icons.settings,
+                      onTap: _showSettingsPopup,
+                    ),
+                    const SizedBox(width: 8),
+                    // Switch camera
+                    _overlayButton(
+                      icon: Icons.flip_camera_android,
+                      onTap: () async {
+                        await _cam.switchCamera();
+                        setState(() {});
+                      },
+                    ),
+                  ],
+                ),
               ),
             ),
 
@@ -732,9 +749,7 @@ class _CameraScreenState extends State<CameraScreen>
                 fontWeight: FontWeight.w600)),
       ]),
     );
-  }
-
-  Widget _buildBottomBar() {
+  }  Widget _buildBottomBar() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
       decoration: BoxDecoration(
@@ -744,7 +759,7 @@ class _CameraScreenState extends State<CameraScreen>
       ),
       child: Row(
         children: [
-          // Stats
+          // Settings button or Stats
           if (_streaming) ...[
             Padding(
               padding: const EdgeInsets.only(left: 8),
@@ -761,6 +776,21 @@ class _CameraScreenState extends State<CameraScreen>
                           color: Colors.white.withOpacity(0.4),
                           fontSize: 10)),
                 ],
+              ),
+            ),
+          ] else ...[
+            // Beautiful settings button on the bottom bar for high visibility
+            GestureDetector(
+              onTap: _showSettingsPopup,
+              child: Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF00E5FF).withOpacity(0.1),
+                  shape: BoxShape.circle,
+                  border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.3)),
+                ),
+                child: const Icon(Icons.settings, color: Color(0xFF00E5FF), size: 20),
               ),
             ),
           ],
@@ -787,7 +817,7 @@ class _CameraScreenState extends State<CameraScreen>
           ? null
           : isConn
               ? () => _disconnect()
-              : _connect,
+              : _showSettingsPopup, // Now opens settings sheet when not connected!
       child: Container(
         width: 64,
         height: 64,
@@ -818,13 +848,14 @@ class _CameraScreenState extends State<CameraScreen>
               ? Icons.link_off
               : isConnecting
                   ? Icons.hourglass_top
-                  : Icons.link,
+                  : Icons.settings, // Show settings gear when not connected to signal they need to review it!
           color: Colors.white,
           size: 28,
         ),
       ),
     );
   }
+
 
   Widget _buildStreamButton() {
     return GestureDetector(
@@ -884,11 +915,6 @@ class _CameraScreenState extends State<CameraScreen>
     return '${(b / (1024 * 1024)).toStringAsFixed(2)}MB';
   }
 }
-
-// ============================================================
-//  Settings Bottom Sheet — Glassmorphism popup
-// ============================================================
-
 class _SettingsSheet extends StatefulWidget {
   final TextEditingController ipCtrl;
   final TextEditingController portCtrl;
@@ -898,6 +924,8 @@ class _SettingsSheet extends StatefulWidget {
   final AppStatus status;
   final bool streaming;
   final List<String> log;
+  final VoidCallback onConnect;
+  final VoidCallback onDisconnect;
   final Future<void> Function(StreamQuality) onQualityChanged;
   final Future<void> Function(bool) onCodecChanged;
   final VoidCallback onClearLog;
@@ -912,6 +940,8 @@ class _SettingsSheet extends StatefulWidget {
     required this.status,
     required this.streaming,
     required this.log,
+    required this.onConnect,
+    required this.onDisconnect,
     required this.onQualityChanged,
     required this.onCodecChanged,
     required this.onClearLog,
@@ -990,6 +1020,43 @@ class _SettingsSheetState extends State<_SettingsSheet> {
             const SizedBox(height: 8),
             _inputField(widget.portCtrl, 'Puerto', Icons.settings_ethernet,
                 enabled: widget.status != AppStatus.connected),
+            const SizedBox(height: 12),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: widget.status == AppStatus.connected
+                      ? const Color(0xFFFF3D5E)
+                      : const Color(0xFF00E5FF),
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12)),
+                  elevation: 4,
+                ),
+                icon: Icon(widget.status == AppStatus.connected
+                    ? Icons.link_off
+                    : Icons.link, size: 20),
+                label: Text(
+                  widget.status == AppStatus.connected
+                      ? 'DESCONECTAR'
+                      : widget.status == AppStatus.connecting
+                          ? 'CONECTANDO...'
+                          : 'CONECTAR AHORA',
+                  style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 13, letterSpacing: 1.0),
+                ),
+                onPressed: widget.status == AppStatus.connecting
+                    ? null
+                    : () {
+                        Navigator.pop(context);
+                        if (widget.status == AppStatus.connected) {
+                          widget.onDisconnect();
+                        } else {
+                          widget.onConnect();
+                        }
+                      },
+              ),
+            ),
             const SizedBox(height: 16),
 
             // Device IP
