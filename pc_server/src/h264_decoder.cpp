@@ -124,9 +124,36 @@ void H264Decoder::processDecodedFrame() {
     const int TARGET_WIDTH = 1280;
     const int TARGET_HEIGHT = 720;
 
+    double srcAspect = (double)w / h;
+    double dstAspect = (double)TARGET_WIDTH / TARGET_HEIGHT;
+
+    int scaleW = TARGET_WIDTH;
+    int scaleH = TARGET_HEIGHT;
+    int offsetX = 0;
+    int offsetY = 0;
+
+    if (std::abs(srcAspect - dstAspect) > 0.05) {
+        // Aspect ratios are different (e.g. portrait stream on landscape virtual camera)
+        if (srcAspect < dstAspect) {
+            // Portrait/narrow stream: fit to target height
+            scaleH = TARGET_HEIGHT;
+            scaleW = static_cast<int>(TARGET_HEIGHT * srcAspect);
+            scaleW = (scaleW >> 1) << 1; // SwsScale works best with even widths
+            offsetX = (TARGET_WIDTH - scaleW) / 2;
+            offsetX = (offsetX >> 1) << 1;
+        } else {
+            // Wide stream: fit to target width
+            scaleW = TARGET_WIDTH;
+            scaleH = static_cast<int>(TARGET_WIDTH / srcAspect);
+            scaleH = (scaleH >> 1) << 1;
+            offsetY = (TARGET_HEIGHT - scaleH) / 2;
+            offsetY = (offsetY >> 1) << 1;
+        }
+    }
+
     swsCtx_ = sws_getCachedContext(swsCtx_,
         w, h, static_cast<AVPixelFormat>(frame_->format),
-        TARGET_WIDTH, TARGET_HEIGHT, AV_PIX_FMT_BGR24,
+        scaleW, scaleH, AV_PIX_FMT_BGR24,
         SWS_BILINEAR, nullptr, nullptr, nullptr);
 
     if (!swsCtx_) {
@@ -139,9 +166,17 @@ void H264Decoder::processDecodedFrame() {
         rgbBuffer_.resize(numBytes);
     }
 
+    // Clear output buffer with black pixels to ensure clean padding
+    memset(rgbBuffer_.data(), 0, numBytes);
+
+    // Fill output pointers with offset
+    uint8_t* destPtr = rgbBuffer_.data() + (offsetY * TARGET_WIDTH * 3) + (offsetX * 3);
     av_image_fill_arrays(rgbFrame_->data, rgbFrame_->linesize,
-                         rgbBuffer_.data(),
-                         AV_PIX_FMT_BGR24, TARGET_WIDTH, TARGET_HEIGHT, 1);
+                         destPtr,
+                         AV_PIX_FMT_BGR24, scaleW, scaleH, 1);
+
+    // Override destination linesize/stride to match the larger target buffer width
+    rgbFrame_->linesize[0] = TARGET_WIDTH * 3;
 
     sws_scale(swsCtx_,
               frame_->data, frame_->linesize, 0, h,

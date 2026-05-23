@@ -152,6 +152,9 @@ class _CameraScreenState extends State<CameraScreen>
   int        _framesSent = 0;
   int        _bytesSent  = 0;
   bool       _streaming  = false;
+  bool       _settingsOpen = true;
+  bool       _isPortrait = true;
+  bool       _showLog = false;
 
   // FPS tracking — updated via periodic timer, NOT per-frame setState
   int _displayFrames = 0;
@@ -167,6 +170,8 @@ class _CameraScreenState extends State<CameraScreen>
   final _cam = CameraService();
   final _h264Encoder = H264Encoder();
   bool  _cameraReady = false;
+  bool  _useNativePreview = false;
+  int?  _nativeTextureId;
   String? _cameraError;
   StreamQuality _quality = StreamQuality.medium;
   bool _useH264 = true;
@@ -216,15 +221,33 @@ class _CameraScreenState extends State<CameraScreen>
   // ---- Stats timer (1 update/sec instead of per-frame) ----------------------
 
   void _startStatsTimer() {
-    _statsTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+    _statsTimer = Timer.periodic(const Duration(seconds: 1), (_) async {
       if (!mounted) return;
-      final fps = _framesSent - _lastFpsFrames;
-      _lastFpsFrames = _framesSent;
-      setState(() {
-        _currentFps = fps;
-        _displayFrames = _framesSent;
-        _displayBytes = _bytesSent;
-      });
+      if (_streaming && _useH264) {
+        final stats = await _h264Encoder.getStats();
+        if (!mounted) return;
+        setState(() {
+          _currentFps = stats['fps']?.round() ?? 0;
+          _displayBytes = stats['bytesSent'] ?? 0;
+          // Synchronize native connection status back to AppStatus
+          final connected = stats['isConnected'] as bool? ?? false;
+          if (connected) {
+            _status = AppStatus.connected;
+            _statusMsg = 'Conectado (H.264)';
+          } else {
+            _status = AppStatus.connecting;
+            _statusMsg = 'Reconectando socket...';
+          }
+        });
+      } else {
+        final fps = _framesSent - _lastFpsFrames;
+        _lastFpsFrames = _framesSent;
+        setState(() {
+          _currentFps = fps;
+          _displayFrames = _framesSent;
+          _displayBytes = _bytesSent;
+        });
+      }
     });
   }
 
@@ -262,116 +285,176 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  Future<void> _startStreaming() async {
-    if (!_cameraReady || _socket == null) return;
-    setState(() => _streaming = true);
-    _resetDimTimer();
-    _appendLog('▶ Streaming iniciado (${_quality.label}, ${_useH264 ? "H.264" : "JPEG"})');
+  Future<void> _switchCamera() async {
+    if (!_cameraReady) return;
+
+    final wasStreaming = _streaming;
+    _appendLog('⚙ Cambiando de cámara...');
 
     if (_useH264) {
-      _appendLog('⚙ Iniciando encoder H.264 hardware...');
-      bool encoderReady = false;
-      bool starting = false;
-      
-      _isPipelineBusy = false;
-      _safetyTimer?.cancel();
+      // 1. Si está transmitiendo, detiene el encoder nativo primero
+      if (wasStreaming) {
+        await _h264Encoder.stop();
+      }
 
-      await _cam.startYuvStreaming(({
-        required yPlane,
-        required uPlane,
-        required vPlane,
-        required yRowStride,
-        required uvRowStride,
-        required uvPixelStride,
-        required width,
-        required height,
-      }) {
-        if (_isPipelineBusy) return Future.value();
-        _isPipelineBusy = true;
+      // 2. Liberar cámara de Flutter
+      await _cam.dispose();
 
-        // Aggressive safety timer: 80ms to prevent permanent freeze
-        _safetyTimer?.cancel();
-        _safetyTimer = Timer(const Duration(milliseconds: 80), () {
-          _isPipelineBusy = false;
-        });
+      // 3. Obtener el siguiente índice de cámara
+      final nextIndex = (_cam.selectedIndex + 1) % _cam.cameras.length;
 
-        if (!encoderReady) {
-          if (starting) return Future.value();
-          starting = true;
-          _appendLog('⚙ Cámara: ${width}x$height — iniciando encoder...');
-          
-          if (_socket != null) {
-            final diagStr = "DIAGNOSTICS: width=$width, height=$height, "
-                "yRowStride=$yRowStride, uvRowStride=$uvRowStride, "
-                "uvPixelStride=$uvPixelStride";
-            _socket!.add(_buildFrame(Uint8List.fromList(diagStr.codeUnits)));
-          }
+      if (wasStreaming) {
+        // Inicializa el CameraService en Flutter con el nuevo índice para actualizar el estado,
+        // luego libéralo inmediatamente para que la capa Kotlin nativa pueda usarlo.
+        await _cam.initializeCamera(cameraIndex: nextIndex, quality: _quality, useYuv: _useH264);
+        await _cam.dispose();
 
-          _h264Encoder.start(
-            width: width,
-            height: height,
-            fps: _quality.fps,
-            bitrate: 2_000_000,
-            onH264Chunk: (chunk) async {
-              if (_socket != null) {
-                try {
-                  final frame = _buildFrame(chunk);
-                  _socket!.add(frame);
-                  
-                  // Fire-and-forget flush: don't block the pipeline!
-                  _socket!.flush().catchError((_) {});
-                  
-                  // Update counters without setState (stats timer handles display)
-                  _framesSent++;
-                  _bytesSent += frame.length;
-                } catch (_) {}
-              }
-              _safetyTimer?.cancel();
-              _isPipelineBusy = false;
-            },
-          ).then((_) {
-            encoderReady = true;
-            _appendLog('✓ Encoder listo');
-          });
-          
-          return Future.value();
+        // 4. Crear textura nativa
+        final textureId = await _h264Encoder.createTexture();
+        if (textureId == null) {
+          _appendLog('⚠ Error al crear textura nativa');
+          await _initCamera();
+          return;
         }
 
-        if (!_h264Encoder.isRunning || !_streaming) {
-          _safetyTimer?.cancel();
-          _isPipelineBusy = false;
-          return Future.value();
-        }
+        final ip = _ipCtrl.text.trim();
+        final port = int.tryParse(_portCtrl.text.trim()) ?? 8080;
+        final width = _isPortrait ? (_quality.targetWidth * 9) ~/ 16 : _quality.targetWidth;
+        final height = _isPortrait ? _quality.targetWidth : (_quality.targetWidth * 9) ~/ 16;
+        final cameraId = _cam.cameras[nextIndex].name;
 
-        _h264Encoder.pushYuvFrame(
-          yPlane: yPlane,
-          uPlane: uPlane,
-          vPlane: vPlane,
-          yRowStride: yRowStride,
-          uvRowStride: uvRowStride,
-          uvPixelStride: uvPixelStride,
+        // 5. Iniciar motor nativo H.264 con la nueva cámara
+        final success = await _h264Encoder.start(
           width: width,
           height: height,
+          fps: _quality.fps,
+          bitrate: 2000000,
+          serverIp: ip,
+          serverPort: port,
+          cameraId: cameraId,
+          textureId: textureId,
         );
 
-        return Future.value();
-      });
+        if (success) {
+          setState(() {
+            _nativeTextureId = textureId;
+            _useNativePreview = true;
+            _cameraReady = true;
+            _streaming = true;
+          });
+          _appendLog('✓ Streaming H.264 cambiado a cámara frontal/trasera ($cameraId)');
+        } else {
+          _appendLog('⚠ Falló reinicio de streaming con cámara $cameraId');
+          await _h264Encoder.stop();
+          await _initCamera();
+        }
+      } else {
+        // Si no estaba transmitiendo, simplemente re-inicializa en Flutter para la vista previa
+        setState(() => _cameraReady = false);
+        await _cam.initializeCamera(cameraIndex: nextIndex, quality: _quality, useYuv: _useH264);
+        setState(() {
+          _cameraReady = true;
+        });
+      }
     } else {
+      // Modo JPEG normal
+      setState(() => _cameraReady = false);
+      await _cam.switchCamera();
+      setState(() {
+        _cameraReady = true;
+        _streaming = _cam.isStreaming;
+      });
+    }
+  }
+
+  Future<void> _startStreaming() async {
+    if (!_cameraReady || (_socket == null && !_useH264)) return;
+    
+    _resetDimTimer();
+
+    if (_useH264) {
+      _appendLog('⚙ Iniciando pipeline H.264 Zero-Copy nativo...');
+      setState(() {
+        _cameraReady = false;
+        _streaming = true;
+      });
+      
+      // 1. Liberar cámara de Flutter para poder abrirla nativamente en Kotlin
+      await _cam.dispose();
+
+      // 2. Crear textura nativa para previsualización
+      final textureId = await _h264Encoder.createTexture();
+      if (textureId == null) {
+        _appendLog('⚠ Error al crear textura nativa');
+        await _initCamera();
+        return;
+      }
+
+      final cameraId = _cam.cameras.isNotEmpty
+          ? _cam.cameras[_cam.selectedIndex].name
+          : '0';
+
+      final ip = _ipCtrl.text.trim();
+      final port = int.tryParse(_portCtrl.text.trim()) ?? 8080;
+      final width = _isPortrait ? (_quality.targetWidth * 9) ~/ 16 : _quality.targetWidth;
+      final height = _isPortrait ? _quality.targetWidth : (_quality.targetWidth * 9) ~/ 16;
+
+      // 3. Iniciar motor nativo H.264
+      final success = await _h264Encoder.start(
+        width: width,
+        height: height,
+        fps: _quality.fps,
+        bitrate: 2000000,
+        serverIp: ip,
+        serverPort: port,
+        cameraId: cameraId,
+        textureId: textureId,
+      );
+
+      if (success) {
+        if (mounted) setState(() {
+          _nativeTextureId = textureId;
+          _useNativePreview = true;
+          _cameraReady = true;
+        });
+        _appendLog('✓ Streaming H.264 nativo a 30 FPS iniciado');
+      } else {
+        _appendLog('⚠ Falló inicio de streaming nativo');
+        await _h264Encoder.stop();
+        await _initCamera();
+      }
+    } else {
+      // Modo JPEG normal
+      setState(() => _streaming = true);
+      _appendLog('▶ Streaming JPEG iniciado (${_quality.label})');
       await _cam.startStreaming(_onJpegFrame);
     }
   }
 
   Future<void> _stopStreaming() async {
-    await _cam.stopStreaming();
-    if (_useH264) await _h264Encoder.stop();
     _safetyTimer?.cancel();
     _dimTimer?.cancel();
     _isPipelineBusy = false;
-    if (mounted) setState(() {
-      _streaming = false;
-      _previewOpacity = 1.0;
-    });
-    _appendLog('■ Streaming detenido');
+    
+    if (_useH264) {
+      await _h264Encoder.stop();
+      if (mounted) setState(() {
+        _useNativePreview = false;
+        _nativeTextureId = null;
+        _streaming = false;
+        _cameraReady = false;
+        _previewOpacity = 1.0;
+      });
+      _appendLog('■ Streaming H.264 detenido, restaurando previsualización...');
+      await _initCamera(); // Restaurar cámara normal
+    } else {
+      await _cam.stopStreaming();
+      if (mounted) setState(() {
+        _streaming = false;
+        _previewOpacity = 1.0;
+      });
+      _appendLog('■ Streaming JPEG detenido');
+    }
   }
 
   void _onJpegFrame(Uint8List jpeg) {
@@ -405,28 +488,41 @@ class _CameraScreenState extends State<CameraScreen>
     _appendLog('→ Conectando a $ip:$port ...');
     await _savePrefs();
 
-    try {
-      _socket = await Socket.connect(ip, port,
-          timeout: const Duration(seconds: 5));
-      _socket!.setOption(SocketOption.tcpNoDelay, true);
-      _socket!.listen(
-        (_) {},
-        onError: (_) => _onDisconnect(),
-        onDone:  ()  => _onDisconnect(),
-        cancelOnError: true,
-      );
+    if (_useH264) {
+      // En modo H.264, la conexión TCP se maneja nativamente en Kotlin.
+      // Simulamos que estamos conectados y llamamos a startStreaming.
       setState(() {
         _status    = AppStatus.connected;
         _statusMsg = 'Conectado a $ip:$port';
       });
-      _appendLog('✓ Conexión establecida');
+      _appendLog('✓ Conexión nativa inicializada');
       WakelockPlus.enable();
-    } on SocketException catch (e) {
-      setState(() {
-        _status    = AppStatus.error;
-        _statusMsg = 'Error: ${e.message}';
-      });
-      _appendLog('✗ ${e.message}');
+      await _startStreaming();
+    } else {
+      try {
+        _socket = await Socket.connect(ip, port,
+            timeout: const Duration(seconds: 5));
+        _socket!.setOption(SocketOption.tcpNoDelay, true);
+        _socket!.listen(
+          (_) {},
+          onError: (_) => _onDisconnect(),
+          onDone:  ()  => _onDisconnect(),
+          cancelOnError: true,
+        );
+        setState(() {
+          _status    = AppStatus.connected;
+          _statusMsg = 'Conectado a $ip:$port';
+        });
+        _appendLog('✓ Conexión establecida (JPEG)');
+        WakelockPlus.enable();
+        await _startStreaming();
+      } on SocketException catch (e) {
+        setState(() {
+          _status    = AppStatus.error;
+          _statusMsg = 'Error: ${e.message}';
+        });
+        _appendLog('✗ ${e.message}');
+      }
     }
   }
 
@@ -444,6 +540,7 @@ class _CameraScreenState extends State<CameraScreen>
       _status    = AppStatus.idle;
       _statusMsg = 'Desconectado';
       _streaming = false;
+      _settingsOpen = true;
     });
   }
 
@@ -497,36 +594,7 @@ class _CameraScreenState extends State<CameraScreen>
   // ============================================================
 
   void _showSettingsPopup() {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => _SettingsSheet(
-        ipCtrl: _ipCtrl,
-        portCtrl: _portCtrl,
-        localIp: _localIp,
-        quality: _quality,
-        useH264: _useH264,
-        status: _status,
-        streaming: _streaming,
-        log: _log,
-        onConnect: _connect,
-        onDisconnect: () => _disconnect(),
-        onQualityChanged: (q) async {
-          setState(() => _quality = q);
-          await _cam.setQuality(q);
-          _appendLog('⚙ Calidad: ${q.label} (${q.targetWidth}p, ${q.fps}fps)');
-        },
-        onCodecChanged: (val) async {
-          setState(() => _useH264 = val);
-          _appendLog('⚙ Codec: ${val ? "H.264" : "JPEG"} — reiniciando cámara...');
-          setState(() => _cameraReady = false);
-          await _initCamera();
-        },
-        onClearLog: () => setState(() => _log.clear()),
-        onRefreshIp: _fetchLocalIp,
-      ),
-    );
+    setState(() => _settingsOpen = true);
   }
 
   // ============================================================
@@ -543,19 +611,37 @@ class _CameraScreenState extends State<CameraScreen>
           fit: StackFit.expand,
           children: [
             // ── Layer 1: Camera preview (fullscreen) with RepaintBoundary ──
-            if (_cameraReady && _cam.controller != null)
-              RepaintBoundary(
-                child: AnimatedOpacity(
-                  opacity: _previewOpacity,
-                  duration: const Duration(milliseconds: 600),
-                  curve: Curves.easeInOut,
-                  child: SizedBox.expand(
-                    child: FittedBox(
-                      fit: BoxFit.cover,
-                      child: SizedBox(
-                        width: _cam.controller!.value.previewSize?.height ?? 1280,
-                        height: _cam.controller!.value.previewSize?.width ?? 720,
-                        child: CameraPreview(_cam.controller!),
+            if (_cameraReady && (_useNativePreview ? _nativeTextureId != null : _cam.controller != null))
+              Visibility(
+                visible: !_settingsOpen,
+                maintainState: true,
+                child: RepaintBoundary(
+                  child: AnimatedOpacity(
+                    opacity: _previewOpacity,
+                    duration: const Duration(milliseconds: 600),
+                    curve: Curves.easeInOut,
+                    child: SizedBox.expand(
+                      child: FittedBox(
+                        fit: BoxFit.cover,
+                        child: SizedBox(
+                          // Native preview: SurfaceTexture transform always rotates content
+                          // to portrait when the phone is locked to portrait, so always use
+                          // portrait dimensions (width < height) regardless of _isPortrait.
+                          // Flutter CameraPreview: use orientation-dependent dimensions.
+                          width: _useNativePreview
+                              ? (_quality.targetWidth * 9 / 16)
+                              : (_isPortrait
+                                  ? (_cam.controller?.value.previewSize?.height ?? 720).toDouble()
+                                  : (_cam.controller?.value.previewSize?.width ?? 1280).toDouble()),
+                          height: _useNativePreview
+                              ? _quality.targetWidth.toDouble()
+                              : (_isPortrait
+                                  ? (_cam.controller?.value.previewSize?.width ?? 1280).toDouble()
+                                  : (_cam.controller?.value.previewSize?.height ?? 720).toDouble()),
+                          child: _useNativePreview && _nativeTextureId != null
+                              ? Texture(textureId: _nativeTextureId!)
+                              : CameraPreview(_cam.controller!),
+                        ),
                       ),
                     ),
                   ),
@@ -653,10 +739,7 @@ class _CameraScreenState extends State<CameraScreen>
                       // Switch camera
                       _overlayButton(
                         icon: Icons.flip_camera_android,
-                        onTap: () async {
-                          await _cam.switchCamera();
-                          setState(() {});
-                        },
+                        onTap: _switchCamera,
                       ),
                     ],
                   ),
@@ -673,7 +756,386 @@ class _CameraScreenState extends State<CameraScreen>
                 child: _buildBottomBar(),
               ),
             ),
+
+            // ── Layer 5: Settings Drawer ──
+            if (_settingsOpen)
+              Positioned.fill(
+                child: GestureDetector(
+                  onTap: () => setState(() => _settingsOpen = false),
+                  child: Container(color: Colors.black.withOpacity(0.6)),
+                ),
+              ),
+            AnimatedPositioned(
+              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeOut,
+              left: 0,
+              right: 0,
+              bottom: _settingsOpen ? 0 : -MediaQuery.of(context).size.height,
+              child: Container(
+                height: MediaQuery.of(context).size.height * 0.85,
+                decoration: const BoxDecoration(
+                  color: Color(0xFF0B101A),
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+                  border: Border(
+                    top: BorderSide(color: Color(0xFF00E5FF), width: 2),
+                  ),
+                ),
+                child: Column(
+                  children: [
+                    // ── Header ──
+                    Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.tune, color: Color(0xFF00E5FF), size: 24),
+                          const SizedBox(width: 8),
+                          const Text(
+                            'Configuración',
+                            style: TextStyle(
+                              color: Color(0xFF00E5FF),
+                              fontSize: 20,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          const Spacer(),
+                          IconButton(
+                            icon: const Icon(Icons.close, color: Colors.white70),
+                            onPressed: () => setState(() => _settingsOpen = false),
+                          ),
+                        ],
+                      ),
+                    ),
+                    
+                    // ── Divider ──
+                    const Divider(color: Color(0xFF1E2D40), height: 1),
+                    
+                    // ── Scrollable content ──
+                    Expanded(
+                      child: ListView(
+                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                        children: [
+                          // IP
+                          _buildSettingsLabel('Servidor PC'),
+                          const SizedBox(height: 8),
+                          TextField(
+                            controller: _ipCtrl,
+                            enabled: _status != AppStatus.connected,
+                            style: const TextStyle(color: Colors.white),
+                            keyboardType: TextInputType.number,
+                            decoration: _inputDecoration('IP del servidor', Icons.computer),
+                          ),
+                          const SizedBox(height: 12),
+                          
+                          // Port
+                          TextField(
+                            controller: _portCtrl,
+                            enabled: _status != AppStatus.connected,
+                            style: const TextStyle(color: Colors.white),
+                            keyboardType: TextInputType.number,
+                            decoration: _inputDecoration('Puerto', Icons.settings_ethernet),
+                          ),
+                          const SizedBox(height: 16),
+                          
+                          // Connect button
+                          SizedBox(
+                            width: double.infinity,
+                            child: ElevatedButton.icon(
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: _status == AppStatus.connected
+                                    ? const Color(0xFFFF3D5E)
+                                    : const Color(0xFF00E5FF),
+                                foregroundColor: Colors.black,
+                                padding: const EdgeInsets.symmetric(vertical: 14),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                              ),
+                              icon: Icon(_status == AppStatus.connected ? Icons.link_off : Icons.link),
+                              label: Text(
+                                _status == AppStatus.connected
+                                    ? 'DESCONECTAR'
+                                    : _status == AppStatus.connecting
+                                        ? 'CONECTANDO...'
+                                        : 'CONECTAR AHORA',
+                                style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 13),
+                              ),
+                              onPressed: _status == AppStatus.connecting
+                                  ? null
+                                  : () {
+                                      setState(() => _settingsOpen = false);
+                                      if (_status == AppStatus.connected) {
+                                        _disconnect();
+                                      } else {
+                                        _connect();
+                                      }
+                                    },
+                            ),
+                          ),
+                          const SizedBox(height: 24),
+                          
+                          // Device IP
+                          _buildSettingsLabel('Dispositivo'),
+                          const SizedBox(height: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF1A2332),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: const Color(0xFF2A3A4E)),
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.wifi, color: Color(0xFF00E5FF), size: 18),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Text('IP local', style: TextStyle(color: Colors.white.withOpacity(0.4), fontSize: 10)),
+                                      Text(_localIp ?? 'Detectando...', style: const TextStyle(color: Color(0xFF00E5FF), fontSize: 14, fontWeight: FontWeight.bold)),
+                                    ],
+                                  ),
+                                ),
+                                GestureDetector(
+                                  onTap: _fetchLocalIp,
+                                  child: const Icon(Icons.refresh, color: Colors.white30, size: 18),
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 24),
+                          
+                          // Quality
+                          _buildSettingsLabel('Calidad de Stream'),
+                          const SizedBox(height: 10),
+                          Row(
+                            children: StreamQuality.values.map((q) {
+                              final selected = q == _quality;
+                              return Expanded(
+                                child: GestureDetector(
+                                  onTap: _streaming ? null : () async {
+                                    setState(() => _quality = q);
+                                    await _cam.setQuality(q);
+                                    _appendLog('⚙ Calidad: ${q.label} (${q.targetWidth}p, ${q.fps}fps)');
+                                  },
+                                  child: Container(
+                                    margin: const EdgeInsets.symmetric(horizontal: 3),
+                                    padding: const EdgeInsets.symmetric(vertical: 10),
+                                    decoration: BoxDecoration(
+                                      color: selected ? const Color(0xFF00E5FF) : const Color(0xFF1A2332),
+                                      borderRadius: BorderRadius.circular(12),
+                                      border: Border.all(color: selected ? const Color(0xFF00E5FF) : const Color(0xFF2A3A4E)),
+                                    ),
+                                    child: Column(
+                                      children: [
+                                        Text(q.label, style: TextStyle(color: selected ? Colors.black : Colors.white, fontSize: 13, fontWeight: FontWeight.bold)),
+                                        const SizedBox(height: 2),
+                                        Text('${q.targetWidth}p · ${q.fps}fps', style: TextStyle(color: selected ? Colors.black54 : Colors.white38, fontSize: 10)),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              );
+                            }).toList(),
+                          ),
+                          const SizedBox(height: 24),
+                          
+                          // Codec
+                          _buildSettingsLabel('Codec'),
+                          const SizedBox(height: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF1A2332),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: const Color(0xFF2A3A4E)),
+                            ),
+                            child: Row(
+                              children: [
+                                const Icon(Icons.memory, color: Color(0xFF00E5FF), size: 18),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    _useH264 ? 'H.264 Hardware (Recomendado)' : 'JPEG Software',
+                                    style: const TextStyle(color: Colors.white, fontSize: 13),
+                                  ),
+                                ),
+                                Switch(
+                                  value: _useH264,
+                                  activeColor: const Color(0xFF00E5FF),
+                                  onChanged: _streaming ? null : (val) async {
+                                    setState(() => _useH264 = val);
+                                    _appendLog('⚙ Codec: ${val ? "H.264" : "JPEG"} — reiniciando...');
+                                    setState(() => _cameraReady = false);
+                                    await _initCamera();
+                                  },
+                                ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 24),
+                          
+                          // Orientation
+                          _buildSettingsLabel('Orientación del Stream'),
+                          const SizedBox(height: 10),
+                          Row(
+                            children: [
+                              _buildOrientationBtn('Vertical', Icons.stay_current_portrait, true),
+                              _buildOrientationBtn('Horizontal', Icons.stay_current_landscape, false),
+                            ],
+                          ),
+                          const SizedBox(height: 24),
+                          
+                          // Log section (collapsible)
+                          GestureDetector(
+                            onTap: () => setState(() => _showLog = !_showLog),
+                            child: Row(
+                              children: [
+                                Icon(Icons.terminal,
+                                    color: const Color(0xFF00E5FF).withOpacity(0.7),
+                                    size: 16),
+                                const SizedBox(width: 6),
+                                Text('Registro de actividad',
+                                    style: TextStyle(
+                                        color: Colors.white.withOpacity(0.5),
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w600)),
+                                const Spacer(),
+                                Icon(
+                                  _showLog
+                                      ? Icons.keyboard_arrow_up
+                                      : Icons.keyboard_arrow_down,
+                                  color: Colors.white30,
+                                  size: 20,
+                                ),
+                              ],
+                            ),
+                          ),
+                          if (_showLog) ...[
+                            const SizedBox(height: 8),
+                            Container(
+                              height: 160,
+                              decoration: BoxDecoration(
+                                color: Colors.black38,
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(color: const Color(0xFF1E2D40)),
+                              ),
+                              padding: const EdgeInsets.all(8),
+                              child: _log.isEmpty
+                                  ? Center(
+                                      child: Text('Sin actividad',
+                                          style: TextStyle(
+                                              color: Colors.white.withOpacity(0.5),
+                                              fontSize: 11)))
+                                  : ListView.builder(
+                                      reverse: true,
+                                      itemCount: _log.length,
+                                      itemBuilder: (_, i) {
+                                        final line = _log[_log.length - 1 - i];
+                                        return Text(line,
+                                            style: TextStyle(
+                                              color: line.contains('✓')
+                                                  ? const Color(0xFF00E5FF)
+                                                  : line.contains('✗') ||
+                                                          line.contains('⚠')
+                                                      ? const Color(0xFFFF3D5E)
+                                                      : Colors.white54,
+                                              fontSize: 10,
+                                              height: 1.5,
+                                              fontFamily: 'monospace',
+                                            ));
+                                      },
+                                    ),
+                            ),
+                            Align(
+                              alignment: Alignment.centerRight,
+                              child: TextButton(
+                                onPressed: () => setState(() => _log.clear()),
+                                child: Text('Limpiar',
+                                    style: TextStyle(
+                                        color: Colors.white.withOpacity(0.3),
+                                        fontSize: 11)),
+                              ),
+                            ),
+                          ],
+                          const SizedBox(height: 40),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSettingsLabel(String text) {
+    return Text(
+      text,
+      style: TextStyle(
+        color: Colors.white.withOpacity(0.7),
+        fontSize: 11,
+        fontWeight: FontWeight.w700,
+        letterSpacing: 1.2,
+      ),
+    );
+  }
+
+  InputDecoration _inputDecoration(String hint, IconData icon) {
+    return InputDecoration(
+      hintText: hint,
+      prefixIcon: Icon(icon, size: 18, color: const Color(0xFF00E5FF)),
+      hintStyle: const TextStyle(color: Colors.white54, fontSize: 13),
+      filled: true,
+      fillColor: const Color(0xFF1A2332),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: const BorderSide(color: Color(0xFF2A3A4E)),
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: const BorderSide(color: Color(0xFF2A3A4E)),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: const BorderSide(color: Color(0xFF00E5FF), width: 1.5),
+      ),
+      disabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: const BorderSide(color: Color(0xFF1A2332)),
+      ),
+    );
+  }
+
+  Widget _buildOrientationBtn(String label, IconData icon, bool portrait) {
+    final selected = _isPortrait == portrait;
+    return Expanded(
+      child: GestureDetector(
+        onTap: _streaming ? null : () => setState(() => _isPortrait = portrait),
+        child: Container(
+          margin: EdgeInsets.only(right: portrait ? 4 : 0, left: portrait ? 0 : 4),
+          padding: const EdgeInsets.symmetric(vertical: 10),
+          decoration: BoxDecoration(
+            color: selected ? const Color(0xFF00E5FF) : const Color(0xFF1A2332),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: selected ? const Color(0xFF00E5FF) : const Color(0xFF2A3A4E)),
+          ),
+          child: Column(
+            children: [
+              Icon(icon, color: selected ? Colors.black : Colors.white70, size: 18),
+              const SizedBox(height: 4),
+              Text(
+                label,
+                style: TextStyle(
+                  color: selected ? Colors.black : Colors.white,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -755,16 +1217,17 @@ class _CameraScreenState extends State<CameraScreen>
         const SizedBox(width: 3),
         Text('FPS',
             style: TextStyle(
-                color: color.withOpacity(0.7),
                 fontSize: 10,
                 fontWeight: FontWeight.w600)),
       ]),
     );
-  }  Widget _buildBottomBar() {
+  }
+
+  Widget _buildBottomBar() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
-        color: const Color(0xED0A0E1A), // Solid dark premium navy background
+        color: const Color(0xFF0A0E1A), // Fully opaque dark premium navy background to prevent GPU alpha blending bugs
         borderRadius: BorderRadius.circular(24),
         border: Border.all(
           color: const Color(0xFF00E5FF), // High-visibility neon cyan border
@@ -839,7 +1302,14 @@ class _CameraScreenState extends State<CameraScreen>
           ? null
           : isConn
               ? () => _disconnect()
-              : _showSettingsPopup, // Now opens settings sheet when not connected!
+              : () {
+                  final ip = _ipCtrl.text.trim();
+                  if (ip.isNotEmpty && ip != '192.168.1.') {
+                    _connect();
+                  } else {
+                    _showSettingsPopup();
+                  }
+                },
       child: Container(
         width: 64,
         height: 64,
@@ -870,7 +1340,7 @@ class _CameraScreenState extends State<CameraScreen>
               ? Icons.link_off
               : isConnecting
                   ? Icons.hourglass_top
-                  : Icons.settings, // Show settings gear when not connected to signal they need to review it!
+                  : Icons.power_settings_new, // Changed to power icon to indicate "Connect" instead of settings
           color: Colors.white,
           size: 28,
         ),
@@ -935,403 +1405,5 @@ class _CameraScreenState extends State<CameraScreen>
     if (b < 1024)         return '${b}B';
     if (b < 1024 * 1024)  return '${(b / 1024).toStringAsFixed(1)}KB';
     return '${(b / (1024 * 1024)).toStringAsFixed(2)}MB';
-  }
-}
-class _SettingsSheet extends StatefulWidget {
-  final TextEditingController ipCtrl;
-  final TextEditingController portCtrl;
-  final String? localIp;
-  final StreamQuality quality;
-  final bool useH264;
-  final AppStatus status;
-  final bool streaming;
-  final List<String> log;
-  final VoidCallback onConnect;
-  final VoidCallback onDisconnect;
-  final Future<void> Function(StreamQuality) onQualityChanged;
-  final Future<void> Function(bool) onCodecChanged;
-  final VoidCallback onClearLog;
-  final VoidCallback onRefreshIp;
-
-  const _SettingsSheet({
-    required this.ipCtrl,
-    required this.portCtrl,
-    required this.localIp,
-    required this.quality,
-    required this.useH264,
-    required this.status,
-    required this.streaming,
-    required this.log,
-    required this.onConnect,
-    required this.onDisconnect,
-    required this.onQualityChanged,
-    required this.onCodecChanged,
-    required this.onClearLog,
-    required this.onRefreshIp,
-  });
-
-  @override
-  State<_SettingsSheet> createState() => _SettingsSheetState();
-}
-
-class _SettingsSheetState extends State<_SettingsSheet> {
-  late StreamQuality _quality;
-  late bool _useH264;
-  bool _showLog = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _quality = widget.quality;
-    _useH264 = widget.useH264;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final bottomPad = MediaQuery.of(context).viewInsets.bottom;
-    return Container(
-      margin: const EdgeInsets.only(top: 80),
-      padding: EdgeInsets.only(bottom: bottomPad),
-      decoration: const BoxDecoration(
-        color: Color(0xF0111827),
-        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-        border: Border(
-          top: BorderSide(color: Color(0xFF00E5FF), width: 1),
-          left: BorderSide(color: Color(0xFF1E2D40), width: 0.5),
-          right: BorderSide(color: Color(0xFF1E2D40), width: 0.5),
-        ),
-      ),
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // Drag handle
-            Center(
-              child: Container(
-                width: 40, height: 4,
-                margin: const EdgeInsets.only(bottom: 16),
-                decoration: BoxDecoration(
-                  color: Colors.white24,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ),
-
-            // Title
-            const Row(
-              children: [
-                Icon(Icons.tune, color: Color(0xFF00E5FF), size: 20),
-                SizedBox(width: 8),
-                Text('Configuración',
-                    style: TextStyle(
-                        color: Color(0xFF00E5FF),
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                        letterSpacing: 0.5)),
-              ],
-            ),
-            const SizedBox(height: 20),
-
-            // Server connection
-            _sectionTitle('Servidor PC'),
-            const SizedBox(height: 8),
-            _inputField(widget.ipCtrl, 'IP del servidor', Icons.computer,
-                enabled: widget.status != AppStatus.connected),
-            const SizedBox(height: 8),
-            _inputField(widget.portCtrl, 'Puerto', Icons.settings_ethernet,
-                enabled: widget.status != AppStatus.connected),
-            const SizedBox(height: 12),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton.icon(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: widget.status == AppStatus.connected
-                      ? const Color(0xFFFF3D5E)
-                      : const Color(0xFF00E5FF),
-                  foregroundColor: Colors.black,
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                  shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12)),
-                  elevation: 4,
-                ),
-                icon: Icon(widget.status == AppStatus.connected
-                    ? Icons.link_off
-                    : Icons.link, size: 20),
-                label: Text(
-                  widget.status == AppStatus.connected
-                      ? 'DESCONECTAR'
-                      : widget.status == AppStatus.connecting
-                          ? 'CONECTANDO...'
-                          : 'CONECTAR AHORA',
-                  style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 13, letterSpacing: 1.0),
-                ),
-                onPressed: widget.status == AppStatus.connecting
-                    ? null
-                    : () {
-                        Navigator.pop(context);
-                        if (widget.status == AppStatus.connected) {
-                          widget.onDisconnect();
-                        } else {
-                          widget.onConnect();
-                        }
-                      },
-              ),
-            ),
-            const SizedBox(height: 16),
-
-            // Device IP
-            _sectionTitle('Dispositivo'),
-            const SizedBox(height: 8),
-            _infoRow(Icons.wifi, 'IP local',
-                widget.localIp ?? 'Detectando...', widget.onRefreshIp),
-            const SizedBox(height: 16),
-
-            // Quality selector
-            _sectionTitle('Calidad de Stream'),
-            const SizedBox(height: 10),
-            Row(
-              children: StreamQuality.values.map((q) {
-                final selected = q == _quality;
-                return Expanded(
-                  child: GestureDetector(
-                    onTap: widget.streaming
-                        ? null
-                        : () {
-                            setState(() => _quality = q);
-                            widget.onQualityChanged(q);
-                          },
-                    child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 200),
-                      margin: const EdgeInsets.symmetric(horizontal: 3),
-                      padding: const EdgeInsets.symmetric(vertical: 10),
-                      decoration: BoxDecoration(
-                        color: selected
-                            ? const Color(0xFF00E5FF)
-                            : const Color(0xFF1A2332),
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(
-                          color: selected
-                              ? const Color(0xFF00E5FF)
-                              : const Color(0xFF2A3A4E),
-                        ),
-                      ),
-                      child: Column(
-                        children: [
-                          Text(q.label,
-                              style: TextStyle(
-                                  color: selected ? Colors.black : Colors.white,
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.bold)),
-                          const SizedBox(height: 2),
-                          Text('${q.targetWidth}p · ${q.fps}fps',
-                              style: TextStyle(
-                                  color: selected
-                                      ? Colors.black54
-                                      : Colors.white38,
-                                  fontSize: 10)),
-                        ],
-                      ),
-                    ),
-                  ),
-                );
-              }).toList(),
-            ),
-            const SizedBox(height: 16),
-
-            // Codec toggle
-            _sectionTitle('Codec'),
-            const SizedBox(height: 8),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-              decoration: BoxDecoration(
-                color: const Color(0xFF1A2332),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: const Color(0xFF2A3A4E)),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.memory, color: Color(0xFF00E5FF), size: 18),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                        _useH264
-                            ? 'H.264 Hardware (Recomendado)'
-                            : 'JPEG Software',
-                        style: const TextStyle(
-                            color: Colors.white, fontSize: 13)),
-                  ),
-                  Switch(
-                    value: _useH264,
-                    activeColor: const Color(0xFF00E5FF),
-                    onChanged: widget.streaming
-                        ? null
-                        : (val) {
-                            setState(() => _useH264 = val);
-                            widget.onCodecChanged(val);
-                          },
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 16),
-
-            // Log section (collapsible)
-            GestureDetector(
-              onTap: () => setState(() => _showLog = !_showLog),
-              child: Row(
-                children: [
-                  Icon(Icons.terminal,
-                      color: const Color(0xFF00E5FF).withOpacity(0.7),
-                      size: 16),
-                  const SizedBox(width: 6),
-                  Text('Registro de actividad',
-                      style: TextStyle(
-                          color: Colors.white.withOpacity(0.5),
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600)),
-                  const Spacer(),
-                  Icon(
-                    _showLog
-                        ? Icons.keyboard_arrow_up
-                        : Icons.keyboard_arrow_down,
-                    color: Colors.white30,
-                    size: 20,
-                  ),
-                ],
-              ),
-            ),
-            if (_showLog) ...[
-              const SizedBox(height: 8),
-              Container(
-                height: 160,
-                decoration: BoxDecoration(
-                  color: Colors.black38,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: const Color(0xFF1E2D40)),
-                ),
-                padding: const EdgeInsets.all(8),
-                child: widget.log.isEmpty
-                    ? Center(
-                        child: Text('Sin actividad',
-                            style: TextStyle(
-                                color: Colors.white.withOpacity(0.2),
-                                fontSize: 11)))
-                    : ListView.builder(
-                        reverse: true,
-                        itemCount: widget.log.length,
-                        itemBuilder: (_, i) {
-                          final line = widget.log[widget.log.length - 1 - i];
-                          return Text(line,
-                              style: TextStyle(
-                                color: line.contains('✓')
-                                    ? const Color(0xFF00E5FF)
-                                    : line.contains('✗') ||
-                                            line.contains('⚠')
-                                        ? const Color(0xFFFF3D5E)
-                                        : Colors.white54,
-                                fontSize: 10,
-                                height: 1.5,
-                                fontFamily: 'monospace',
-                              ));
-                        },
-                      ),
-              ),
-              Align(
-                alignment: Alignment.centerRight,
-                child: TextButton(
-                  onPressed: widget.onClearLog,
-                  child: Text('Limpiar',
-                      style: TextStyle(
-                          color: Colors.white.withOpacity(0.3),
-                          fontSize: 11)),
-                ),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _sectionTitle(String text) {
-    return Text(text,
-        style: TextStyle(
-            color: Colors.white.withOpacity(0.5),
-            fontSize: 11,
-            fontWeight: FontWeight.w700,
-            letterSpacing: 1.2));
-  }
-
-  Widget _inputField(TextEditingController c, String hint, IconData icon,
-      {bool enabled = true}) {
-    return TextField(
-      controller: c,
-      enabled: enabled,
-      keyboardType: TextInputType.number,
-      style: const TextStyle(color: Colors.white, fontSize: 14),
-      decoration: InputDecoration(
-        hintText: hint,
-        prefixIcon:
-            Icon(icon, size: 18, color: const Color(0xFF00E5FF)),
-        hintStyle: const TextStyle(color: Colors.white24, fontSize: 13),
-        filled: true,
-        fillColor: const Color(0xFF1A2332),
-        contentPadding:
-            const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-        border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: const BorderSide(color: Color(0xFF2A3A4E))),
-        enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: const BorderSide(color: Color(0xFF2A3A4E))),
-        focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide:
-                const BorderSide(color: Color(0xFF00E5FF), width: 1.5)),
-        disabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: const BorderSide(color: Color(0xFF1A2332))),
-      ),
-    );
-  }
-
-  Widget _infoRow(
-      IconData icon, String label, String value, VoidCallback onRefresh) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1A2332),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFF2A3A4E)),
-      ),
-      child: Row(
-        children: [
-          Icon(icon, color: const Color(0xFF00E5FF), size: 18),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(label,
-                    style: TextStyle(
-                        color: Colors.white.withOpacity(0.4), fontSize: 10)),
-                Text(value,
-                    style: const TextStyle(
-                        color: Color(0xFF00E5FF),
-                        fontSize: 14,
-                        fontWeight: FontWeight.bold)),
-              ],
-            ),
-          ),
-          GestureDetector(
-            onTap: onRefresh,
-            child:
-                const Icon(Icons.refresh, color: Colors.white30, size: 18),
-          ),
-        ],
-      ),
-    );
   }
 }

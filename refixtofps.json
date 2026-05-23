@@ -1,0 +1,176 @@
+{
+  "project": "Cámara Libre — H.264 Pipeline Rewrite Blueprint",
+  "version": "2.0",
+  "problem_diagnosis": {
+    "symptom": "Stuck at ~15 FPS regardless of resolution or bitrate",
+    "root_cause": "4 memory copies per frame + Dart GC pressure + MethodChannel JNI overhead",
+    "current_pipeline_bottlenecks": [
+      {
+        "step": 1,
+        "layer": "Camera2",
+        "action": "ImageReader YUV420_888 allocates native heap buffer",
+        "copy": "Native #1"
+      },
+      {
+        "step": 2,
+        "layer": "Flutter camera plugin",
+        "action": "JNI copies YUV planes into Dart Uint8List (1.3MB @ 720p)",
+        "copy": "JNI Dart #2"
+      },
+      {
+        "step": 3,
+        "layer": "Dart H264Encoder",
+        "action": "MethodChannel.pushFrame() copies Dart bytes back to Java/Kotlin",
+        "copy": "JNI Native #3"
+      },
+      {
+        "step": 4,
+        "layer": "Kotlin MediaCodec",
+        "action": "Copy into MediaCodec input ByteBuffer",
+        "copy": "Native #4"
+      },
+      {
+        "step": 5,
+        "layer": "Output",
+        "action": "onFrameEncoded copies H264 NAL units from native to Dart again",
+        "copy": "JNI Dart #5"
+      }
+    ],
+    "why_15fps": "At 30fps, this pipeline moves ~40MB/s of memory bidirectionally. GC pauses + JNI marshalling + _encodingBusy flag dropping frames = hard ceiling at 15fps."
+  },
+  "target_architecture": {
+    "principle": "Pixels must NEVER touch Dart heap during streaming. Dart handles UI and socket only.",
+    "ideal_pipeline": [
+      "Camera2 (Kotlin) → MediaCodec.createInputSurface() [ZERO COPY]",
+      "Hardware H.264 encoder (silicon) → Kotlin ByteBuffer output",
+      "Kotlin TCP socket thread → sends NAL units directly to PC",
+      "Dart UI thread → start/stop commands + stats display only"
+    ],
+    "latency_target_ms": 50,
+    "fps_target": 30
+  },
+  "implementation_steps": [
+    {
+      "step_id": 1,
+      "title": "Delete YUV MethodChannel traffic",
+      "action": "Remove pushFrame() and onFrameEncoded() from MethodChannel. The channel now only carries control commands: start, stop, setBitrate.",
+      "files_to_modify": [
+        "mobile_app/lib/h264_encoder.dart"
+      ],
+      "critical": true
+    },
+    {
+      "step_id": 2,
+      "title": "Rewrite Kotlin native plugin",
+      "action": "Create a single Kotlin class that owns CameraDevice + MediaCodec + Socket. No Flutter camera plugin involved in streaming.",
+      "files_to_create": [
+        "mobile_app/android/app/src/main/kotlin/com/feer/cameralibre/H264StreamingEngine.kt"
+      ],
+      "critical": true
+    },
+    {
+      "step_id": 3,
+      "title": "Use Surface-to-Surface zero copy",
+      "action": "MediaCodec configured with COLOR_FormatSurface. Camera2 target is encoderSurface directly. No ByteBuffer, no ImageReader.",
+      "config": {
+        "media_format_keys": {
+          "KEY_COLOR_FORMAT": "COLOR_FormatSurface",
+          "KEY_BIT_RATE": "user_configurable",
+          "KEY_FRAME_RATE": 30,
+          "KEY_I_FRAME_INTERVAL": 1
+        },
+        "capture_request_keys": {
+          "TEMPLATE": "TEMPLATE_RECORD",
+          "CONTROL_AE_TARGET_FPS_RANGE": "[30, 30] fixed"
+        }
+      },
+      "critical": true
+    },
+    {
+      "step_id": 4,
+      "title": "Move socket to Kotlin",
+      "action": "The TCP client lives in Kotlin, not Dart. It reads NAL units from MediaCodec output and writes to socket in a dedicated HandlerThread.",
+      "files_to_modify": [
+        "mobile_app/android/app/src/main/kotlin/com/feer/cameralibre/MainActivity.kt"
+      ],
+      "critical": true
+    },
+    {
+      "step_id": 5,
+      "title": "Optional: Preview surface",
+      "action": "If you need phone screen preview, add a TextureView Surface as SECOND target in createCaptureSession. WARNING: some devices drop FPS with dual surfaces. Test thoroughly.",
+      "alternative": "Skip phone preview; show a low-fps decoded thumbnail from the PC feedback loop, or use a static overlay UI.",
+      "critical": false
+    },
+    {
+      "step_id": 6,
+      "title": "Dart UI refactor",
+      "action": "Dart only calls method channel for: start(ip, port, width, height, fps, bitrate), stop(), getStats(). No frame data ever crosses the channel.",
+      "files_to_modify": [
+        "mobile_app/lib/camera_service.dart",
+        "mobile_app/lib/streaming_page.dart"
+      ],
+      "critical": false
+    }
+  ],
+  "kotlin_skeleton": {
+    "file": "H264StreamingEngine.kt",
+    "description": "Core engine. Owns Camera2 lifecycle, MediaCodec, and TCP socket thread.",
+    "code": "package com.feer.cameralibre\n\nimport android.content.Context\nimport android.hardware.camera2.*\nimport android.media.MediaCodec\nimport android.media.MediaCodecInfo\nimport android.media.MediaFormat\nimport android.os.Handler\nimport android.os.HandlerThread\nimport android.util.Range\nimport android.view.Surface\nimport java.net.Socket\nimport java.nio.ByteBuffer\n\nclass H264StreamingEngine(private val context: Context) {\n    private var cameraDevice: CameraDevice? = null\n    private var mediaCodec: MediaCodec? = null\n    private var encoderSurface: Surface? = null\n    private var captureSession: CameraCaptureSession? = null\n    private var socket: Socket? = null\n    private var isRunning = false\n\n    private val cameraThread = HandlerThread(\"CameraThread\").apply { start() }\n    private val cameraHandler = Handler(cameraThread.looper)\n    private val codecThread = HandlerThread(\"CodecThread\").apply { start() }\n    private val codecHandler = Handler(codecThread.looper)\n\n    fun start(\n        cameraId: String,\n        width: Int,\n        height: Int,\n        fps: Int,\n        bitrate: Int,\n        serverIp: String,\n        serverPort: Int\n    ) {\n        isRunning = true\n\n        // 1. Setup TCP socket in background\n        Thread {\n            socket = Socket(serverIp, serverPort)\n        }.start()\n\n        // 2. Configure MediaCodec with Surface input\n        val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height)\n        format.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)\n        format.setInteger(MediaFormat.KEY_BIT_RATE, bitrate)\n        format.setInteger(MediaFormat.KEY_FRAME_RATE, fps)\n        format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)\n\n        mediaCodec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)\n        mediaCodec?.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)\n        encoderSurface = mediaCodec?.createInputSurface()\n        mediaCodec?.start()\n\n        // 3. Start NAL unit drainer\n        codecHandler.post { drainEncoder() }\n\n        // 4. Open Camera2 and target the encoder Surface\n        val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager\n        cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {\n            override fun onOpened(camera: CameraDevice) {\n                cameraDevice = camera\n                val surfaces = mutableListOf<Surface>()\n                encoderSurface?.let { surfaces.add(it) }\n\n                camera.createCaptureSession(\n                    surfaces,\n                    object : CameraCaptureSession.StateCallback() {\n                        override fun onConfigured(session: CameraCaptureSession) {\n                            captureSession = session\n                            val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)\n                            surfaces.forEach { builder.addTarget(it) }\n                            builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(fps, fps))\n                            session.setRepeatingRequest(builder.build(), null, cameraHandler)\n                        }\n                        override fun onConfigureFailed(session: CameraCaptureSession) {}\n                    },\n                    cameraHandler\n                )\n            }\n            override fun onDisconnected(camera: CameraDevice) { stop() }\n            override fun onError(camera: CameraDevice, error: Int) { stop() }\n        }, cameraHandler)\n    }\n\n    private fun drainEncoder() {\n        val info = MediaCodec.BufferInfo()\n        while (isRunning) {\n            val idx = mediaCodec?.dequeueOutputBuffer(info, 10000) ?: -1\n            if (idx >= 0) {\n                val buffer = mediaCodec?.getOutputBuffer(idx)\n                if (buffer != null && socket?.isConnected == true) {\n                    val chunk = ByteArray(info.size)\n                    buffer.get(chunk)\n                    // Write length-prefixed NAL unit to TCP\n                    socket?.getOutputStream()?.apply {\n                        write((chunk.size shr 24) and 0xFF)\n                        write((chunk.size shr 16) and 0xFF)\n                        write((chunk.size shr 8) and 0xFF)\n                        write(chunk.size and 0xFF)\n                        write(chunk)\n                        flush()\n                    }\n                }\n                mediaCodec?.releaseOutputBuffer(idx, false)\n            }\n        }\n    }\n\n    fun stop() {\n        isRunning = false\n        captureSession?.close()\n        cameraDevice?.close()\n        mediaCodec?.stop()\n        mediaCodec?.release()\n        encoderSurface?.release()\n        socket?.close()\n        cameraThread.quitSafely()\n        codecThread.quitSafely()\n    }\n}"
+  },
+  "method_channel_contract": {
+    "channel_name": "com.feer.cameralibre/streaming",
+    "methods": {
+      "start": {
+        "arguments": {
+          "cameraId": "String (e.g. '0' or '1')",
+          "serverIp": "String",
+          "serverPort": "Int",
+          "width": "Int (1280)",
+          "height": "Int (720)",
+          "fps": "Int (30)",
+          "bitrate": "Int (2000000)"
+        },
+        "returns": "Boolean (success)"
+      },
+      "stop": {
+        "arguments": {},
+        "returns": "Boolean"
+      },
+      "getStats": {
+        "arguments": {},
+        "returns": {
+          "fps": "Double",
+          "bytesSent": "Long",
+          "isConnected": "Boolean"
+        }
+      }
+    },
+    "events": "None. All frame data stays in Kotlin."
+  },
+  "dart_ui_skeleton": {
+    "file": "streaming_controller.dart",
+    "description": "Dart only orchestrates. No pixel handling.",
+    "code": "class StreamingController {\n  static const _channel = MethodChannel('com.feer.cameralibre/streaming');\n\n  Future<bool> start({\n    required String ip,\n    required int port,\n    required int width,\n    required int height,\n    required int fps,\n    required int bitrate,\n    required String cameraId,\n  }) async {\n    return await _channel.invokeMethod('start', {\n      'cameraId': cameraId,\n      'serverIp': ip,\n      'serverPort': port,\n      'width': width,\n      'height': height,\n      'fps': fps,\n      'bitrate': bitrate,\n    });\n  }\n\n  Future<bool> stop() async {\n    return await _channel.invokeMethod('stop');\n  }\n\n  Future<Map> getStats() async {\n    return await _channel.invokeMethod('getStats');\n  }\n}"
+  },
+  "critical_warnings": [
+    "NEVER pass YUV planes through MethodChannel. It is architecturally impossible to reach 30fps this way.",
+    "COLOR_FormatSurface is the ONLY viable color format for 30fps+ zero-copy encoding.",
+    "TEMPLATE_RECORD + fixed [30,30] fps range is mandatory. TEMPLATE_PREVIEW will drop to 15fps under AE control.",
+    "If adding a preview TextureView as second surface, test on low-end devices (Samsung A-series, Xiaomi Redmi). Many limit dual-surface throughput.",
+    "The socket write in drainEncoder() must be non-blocking or on a separate thread. Do NOT block the MediaCodec output thread.",
+    "Use length-prefixed framing (4-byte header + NAL payload) so your PC server parser stays compatible."
+  ],
+  "estimated_effort": {
+    "kotlin_rewrite_lines": 250,
+    "dart_refactor_lines": 80,
+    "testing_time_hours": 4,
+    "complexity": "Medium-High",
+    "impact": "15fps → 30fps stable (2x improvement, minimum)"
+  },
+  "competitive_context": {
+    "droidcam_architecture": "Native Android Camera2 + MediaCodec Surface + direct socket. No Flutter/Dart in the pixel path.",
+    "your_current_architecture": "Flutter camera plugin (ImageReader) → Dart YUV → MethodChannel → Kotlin MediaCodec. Dart owns pixels.",
+    "why_this_matters": "DroidCam wins on FPS because they never cross the JNI/Dart boundary with uncompressed frames. You must match this architecture to compete."
+  }
+}

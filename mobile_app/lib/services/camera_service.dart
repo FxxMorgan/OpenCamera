@@ -88,11 +88,11 @@ Uint8List _encodeYuvToJpeg(_YuvData d) {
 // ---------------------------------------------------------------------------
 
 enum StreamQuality {
-  low(targetWidth: 320, jpegQuality: 60, fps: 15,
-      preset: ResolutionPreset.low),
-  medium(targetWidth: 640, jpegQuality: 75, fps: 20,
+  low(targetWidth: 640, jpegQuality: 60, fps: 30,
       preset: ResolutionPreset.medium),
-  high(targetWidth: 1280, jpegQuality: 85, fps: 25,
+  medium(targetWidth: 960, jpegQuality: 75, fps: 30,
+      preset: ResolutionPreset.medium),
+  high(targetWidth: 1280, jpegQuality: 85, fps: 30,
       preset: ResolutionPreset.high);
 
   const StreamQuality({

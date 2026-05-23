@@ -1,90 +1,104 @@
 import 'dart:async';
-import 'dart:typed_data';
-
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 class H264Encoder {
   static const _channel = MethodChannel('com.feer.cameralibre/h264_encoder');
 
-  Timer? _pollTimer;
   bool _isRunning = false;
-  bool _encoderReady = false;
-  int _chunksReceived = 0;
+  int? _textureId;
 
-  int get chunksReceived => _chunksReceived;
+  int? get textureId => _textureId;
+  bool get isRunning => _isRunning;
 
-  /// Starts the hardware H.264 encoder.
-  /// Uses MethodChannel polling instead of EventChannel for reliability.
-  Future<void> start({
+  /// Allocates a native hardware-accelerated preview texture in Flutter's engine.
+  /// Returns the texture ID.
+  Future<int?> createTexture() async {
+    try {
+      final Map? res = await _channel.invokeMapMethod('createTexture');
+      if (res != null) {
+        _textureId = res['textureId'] as int?;
+        return _textureId;
+      }
+    } on PlatformException catch (e) {
+      print('[H264Encoder] Failed to create native texture: $e');
+    }
+    return null;
+  }
+
+  /// Releases the native hardware-accelerated preview texture.
+  Future<void> releaseTexture() async {
+    try {
+      await _channel.invokeMethod('releaseTexture');
+      _textureId = null;
+    } on PlatformException catch (e) {
+      print('[H264Encoder] Failed to release native texture: $e');
+    }
+  }
+
+  /// Starts the native zero-copy camera capture, H.264 hardware encoding,
+  /// and TCP streaming directly from Android native code to the PC server.
+  Future<bool> start({
     required int width,
     required int height,
     required int fps,
     required int bitrate,
-    required void Function(Uint8List chunk) onH264Chunk,
+    required String serverIp,
+    required int serverPort,
+    String cameraId = '0',
+    int? textureId,
   }) async {
-    if (_isRunning) return;
+    if (_isRunning) return true;
 
-    _chunksReceived = 0;
-    _encoderReady = false;
-
-    await _channel.invokeMethod('start', {
-      'width': width,
-      'height': height,
-      'fps': fps,
-      'bitrate': bitrate,
-    });
-
-    _isRunning = true;
-    _encoderReady = true;
-
-    // Direct push notification instead of polling timer
-    _channel.setMethodCallHandler((call) async {
-      if (call.method == 'onFrameEncoded') {
-        final chunk = call.arguments as Uint8List;
-        _chunksReceived++;
-        onH264Chunk(chunk);
-      }
-    });
-  }
-
-  /// Push a YUV420_888 frame to be encoded.
-  Future<void> pushYuvFrame({
-    required Uint8List yPlane,
-    required Uint8List uPlane,
-    required Uint8List vPlane,
-    required int yRowStride,
-    required int uvRowStride,
-    required int uvPixelStride,
-    required int width,
-    required int height,
-  }) async {
-    if (!_isRunning) return;
     try {
-      await _channel.invokeMethod('pushFrame', {
-        'yPlane': yPlane,
-        'uPlane': uPlane,
-        'vPlane': vPlane,
-        'yRowStride': yRowStride,
-        'uvRowStride': uvRowStride,
-        'uvPixelStride': uvPixelStride,
+      final bool? success = await _channel.invokeMethod('start', {
         'width': width,
         'height': height,
+        'fps': fps,
+        'bitrate': bitrate,
+        'serverIp': serverIp,
+        'serverPort': serverPort,
+        'cameraId': cameraId,
+        'textureId': textureId,
       });
-    } catch (e) {
-      debugPrint('[H264Encoder] Push error: $e');
+      _isRunning = success ?? false;
+      return _isRunning;
+    } on PlatformException catch (e) {
+      print('[H264Encoder] Native start error: $e');
+      _isRunning = false;
+      return false;
     }
   }
 
+  /// Stops the native zero-copy streaming session and releases textures.
   Future<void> stop() async {
     if (!_isRunning) return;
     _isRunning = false;
-    _encoderReady = false;
-    _pollTimer?.cancel();
-    _pollTimer = null;
-    _channel.setMethodCallHandler(null);
-    await _channel.invokeMethod('stop');
+    try {
+      await _channel.invokeMethod('stop');
+      await releaseTexture();
+    } on PlatformException catch (e) {
+      print('[H264Encoder] Native stop error: $e');
+    }
   }
 
-  bool get isRunning => _isRunning;
+  /// Returns active native stats: fps (double), bytesSent (int), isConnected (bool)
+  Future<Map<String, dynamic>> getStats() async {
+    try {
+      final Map? stats = await _channel.invokeMapMethod('getStats');
+      if (stats != null) {
+        return {
+          'fps': stats['fps'] as double? ?? 0.0,
+          'bytesSent': stats['bytesSent'] as int? ?? 0,
+          'isConnected': stats['isConnected'] as bool? ?? false,
+        };
+      }
+    } on PlatformException catch (e) {
+      print('[H264Encoder] Failed to get native stats: $e');
+    }
+    return {
+      'fps': 0.0,
+      'bytesSent': 0,
+      'isConnected': false,
+    };
+  }
 }
