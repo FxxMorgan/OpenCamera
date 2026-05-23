@@ -155,47 +155,43 @@ class H264StreamingEngine(private val context: Context) {
             val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
             val chars = cameraManager.getCameraCharacteristics(camera.id)
             val ranges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES)
-            
+
             if (ranges != null && ranges.isNotEmpty()) {
-                // First, look for exact match [targetFps, targetFps]
-                for (range in ranges) {
-                    if (range.lower == targetFps && range.upper == targetFps) {
-                        Log.i(TAG, "Using exact target FPS range: $range")
-                        return range
-                    }
-                }
-                
-                // Second, look for a range containing targetFps
+                // Prefer the WIDEST range whose upper bound matches targetFps.
+                // A wider range (lower minimum) gives AE more headroom to use longer
+                // exposure times in low-light, which is critical for front cameras
+                // with small sensors. E.g. [15,30] allows up to 66ms exposure vs
+                // [30,30] which caps at 33ms.
                 var bestRange: Range<Int>? = null
                 for (range in ranges) {
                     if (range.upper == targetFps) {
-                        if (bestRange == null || range.lower > bestRange.lower) {
+                        if (bestRange == null || range.lower < bestRange.lower) {
                             bestRange = range
                         }
                     }
                 }
                 if (bestRange != null) {
-                    Log.i(TAG, "Using upper-match target FPS range: $bestRange")
+                    Log.i(TAG, "Using widest FPS range for target $targetFps: $bestRange")
                     return bestRange
                 }
-                
-                // Third, just find the range with upper closest to targetFps
+
+                // Fallback: find the range with upper closest to targetFps, preferring wider
                 var closestRange = ranges[0]
                 var minDiff = Math.abs(closestRange.upper - targetFps)
                 for (range in ranges) {
                     val diff = Math.abs(range.upper - targetFps)
-                    if (diff < minDiff) {
+                    if (diff < minDiff || (diff == minDiff && range.lower < closestRange.lower)) {
                         minDiff = diff
                         closestRange = range
                     }
                 }
-                Log.i(TAG, "Using closest match target FPS range: $closestRange")
+                Log.i(TAG, "Using closest match FPS range: $closestRange")
                 return closestRange
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error selecting FPS range", e)
         }
-        // Fallback to safe range
+        // Fallback to safe wide range
         return Range(15, 30)
     }
 
@@ -221,21 +217,25 @@ class H264StreamingEngine(private val context: Context) {
                     captureSession = session
                     
                     try {
-                        val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                        val builder = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
                             targets.forEach { addTarget(it) }
                             // Dynamically select target FPS range to prevent crashes on front camera / budget devices
                             val fpsRange = selectBestFpsRange(camera, fps)
                             set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
 
+                            // Explicitly enable auto-exposure, auto-white-balance, and auto-focus for stability
+                            set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
+                            set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                            set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
+
                             // Boost exposure compensation to brighten the image.
-                            // TEMPLATE_RECORD tends to be darker than TEMPLATE_PREVIEW.
                             try {
                                 val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
                                 val chars = cameraManager.getCameraCharacteristics(camera.id)
                                 val aeRange = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
                                 if (aeRange != null) {
-                                    // Apply +4 EV steps, clamped to device's supported range
-                                    val boost = 4.coerceAtMost(aeRange.upper)
+                                    // Apply +2 EV steps, clamped to device's supported range
+                                    val boost = 2.coerceAtMost(aeRange.upper)
                                     set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, boost)
                                     Log.i(TAG, "AE exposure compensation set to +$boost (range: $aeRange)")
                                 }

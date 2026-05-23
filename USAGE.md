@@ -144,4 +144,4 @@ Este error se produce cuando el servidor intenta abrir o truncar el archivo de m
 
 ### 5. La imagen se ve oscura comparada con la camara nativa
 
-El motor de captura utiliza el template `TEMPLATE_RECORD` de Camera2 que tiende a usar exposicion mas conservadora. La compensacion AE de +4 EV esta aplicada por defecto. Si necesitas ajustar el brillo, modifica el valor de `boost` en el archivo `H264StreamingEngine.kt` (linea del `coerceAtMost`).
+El motor de captura utiliza el template `TEMPLATE_RECORD` de Camera2 que tiende a usar una exposicion mas conservadora. La compensacion AE de +2 EV esta aplicada por defecto. Si necesitas ajustar el brillo, modifica el valor de `boost` en el archivo `H264StreamingEngine.kt` (linea del `coerceAtMost`).

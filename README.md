@@ -36,7 +36,7 @@ La version distribuida a traves de Google Play Store incluye publicidad no intru
 - **Camara virtual DirectShow nativa (.ax)**: Registrada en el sistema COM para ser compatible con Discord Desktop, OBS Studio, Google Chrome, Microsoft Edge, Firefox, Zoom y Teams.
 - **Colores corregidos de alta fidelidad**: Conversion de color BGR24 a YUY2 optimizada a nivel binario que elimina los tonos azulados y restituye los colores calidos naturales.
 - **Preview nativa zero-copy**: La previsualizacion en el telefono utiliza una textura de hardware nativa de Flutter conectada directamente a la superficie de Camera2, sin copias intermedias de frames en memoria.
-- **Compensacion de exposicion automatica**: El motor nativo aplica una compensacion AE de +4 EV sobre el template de grabacion para igualar el brillo de la app de camara nativa del dispositivo.
+- **Compensacion de exposicion automatica**: El motor nativo aplica una compensacion AE de +2 EV sobre el template de grabacion para igualar el brillo de la app de camara nativa del dispositivo.
 - **Orientacion de stream configurable**: Soporte para transmision en modo vertical (9:16) y horizontal (16:9) con previsualizacion adaptativa en el dispositivo.
 - **Auto-dim inteligente**: Tras 5 segundos de streaming sin actividad tactil, la previsualizacion se atenua al 30% de opacidad para reducir el consumo de GPU y bateria.
 - **Deteccion de IP local**: Monitor de IP local integrado en la aplicacion para facilitar la sincronizacion con el servidor PC.
@@ -54,7 +54,7 @@ El siguiente flujo ilustra el ciclo de vida de un frame de video, desde el senso
         v
 [H264EncoderPlugin - Kotlin]
    Camera2 API + MediaCodec AVC (Hardware)
-   Compensacion AE +4 EV
+   Compensacion AE +2 EV
    Superficie zero-copy compartida con preview
         |
         v

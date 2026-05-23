@@ -98,34 +98,42 @@ STDMETHODIMP CameraLibreStream::NonDelegatingQueryInterface(REFIID riid, void** 
     return CSourceStream::NonDelegatingQueryInterface(riid, ppv);
 }
 
-static void ConvertRGB24ToYUY2(const uint8_t* rgb, uint8_t* yuy2, int width, int height) {
+static void ConvertBGR24ToYUY2(const uint8_t* bgr, uint8_t* yuy2, int width, int height) {
     // Force even width for perfect YUY2 pairs
     int evenWidth = (width >> 1) << 1;
     for (int y = 0; y < height; ++y) {
-        const uint8_t* srcRow = rgb + y * width * 3;
+        const uint8_t* srcRow = bgr + y * width * 3;
         uint8_t* dstRow = yuy2 + y * evenWidth * 2;
         for (int x = 0; x < evenWidth; x += 2) {
             int srcIdx1 = x * 3;
             int srcIdx2 = (x + 1) * 3;
 
-            uint8_t r1 = srcRow[srcIdx1];
+            // FFmpeg AV_PIX_FMT_BGR24 byte order: B, G, R
+            uint8_t b1 = srcRow[srcIdx1];
             uint8_t g1 = srcRow[srcIdx1 + 1];
-            uint8_t b1 = srcRow[srcIdx1 + 2];
+            uint8_t r1 = srcRow[srcIdx1 + 2];
 
-            uint8_t r2 = srcRow[srcIdx2];
+            uint8_t b2 = srcRow[srcIdx2];
             uint8_t g2 = srcRow[srcIdx2 + 1];
-            uint8_t b2 = srcRow[srcIdx2 + 2];
+            uint8_t r2 = srcRow[srcIdx2 + 2];
 
-            // Standard ITU-R BT.601 YUV conversion using fast integer shifts
-            uint8_t y1 = static_cast<uint8_t>(((66 * r1 + 129 * g1 + 25 * b1 + 128) >> 8) + 16);
-            uint8_t y2 = static_cast<uint8_t>(((66 * r2 + 129 * g2 + 25 * b2 + 128) >> 8) + 16);
+            // Full-range BT.601 YUV conversion (Y: 0-255, not limited 16-235)
+            // This produces brighter output that matches modern display expectations.
+            int y1_val = (( 77 * r1 + 150 * g1 +  29 * b1 + 128) >> 8);
+            int y2_val = (( 77 * r2 + 150 * g2 +  29 * b2 + 128) >> 8);
 
             int rAvg = (r1 + r2) >> 1;
             int gAvg = (g1 + g2) >> 1;
             int bAvg = (b1 + b2) >> 1;
 
-            uint8_t u = static_cast<uint8_t>(((-38 * rAvg - 74 * gAvg + 112 * bAvg + 128) >> 8) + 128);
-            uint8_t v = static_cast<uint8_t>(((112 * rAvg - 94 * gAvg - 18 * bAvg + 128) >> 8) + 128);
+            int u_val = ((-43 * rAvg -  85 * gAvg + 128 * bAvg + 128) >> 8) + 128;
+            int v_val = ((128 * rAvg - 107 * gAvg -  21 * bAvg + 128) >> 8) + 128;
+
+            // Clamp to valid byte range
+            uint8_t y1 = static_cast<uint8_t>(y1_val < 0 ? 0 : (y1_val > 255 ? 255 : y1_val));
+            uint8_t y2 = static_cast<uint8_t>(y2_val < 0 ? 0 : (y2_val > 255 ? 255 : y2_val));
+            uint8_t u  = static_cast<uint8_t>(u_val  < 0 ? 0 : (u_val  > 255 ? 255 : u_val));
+            uint8_t v  = static_cast<uint8_t>(v_val  < 0 ? 0 : (v_val  > 255 ? 255 : v_val));
 
             int dstIdx = x * 2;
             dstRow[dstIdx]     = y1;
@@ -161,7 +169,7 @@ HRESULT CameraLibreStream::FillBuffer(IMediaSample* pSamp) {
                 uint8_t* srcData = reinterpret_cast<uint8_t*>(header + 1);
                 if (isYUY2) {
                     // YUY2 is natively top-down in DirectShow, so convert without flipping!
-                    ConvertRGB24ToYUY2(srcData, pData, currentWidth_, currentHeight_);
+                    ConvertBGR24ToYUY2(srcData, pData, currentWidth_, currentHeight_);
                 } else {
                     // RGB24 is bottom-up in DirectShow, so flip vertically!
                     int stride = currentWidth_ * 3;
