@@ -52,3 +52,6 @@ Makefile
 /mobile_app/.packages
 /mobile_app/.flutter-plugins
 /mobile_app/.flutter-plugins-dependencies
+
+# Local scratch workspace
+scratch/
